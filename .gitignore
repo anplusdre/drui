@@ -1,0 +1,7 @@
+target/
+target-alt/
+*.bak
+src.bak/
+/design.json
+/.claude/settings.local.json
+/.claude/commands/

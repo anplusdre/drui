@@ -1,0 +1,35 @@
+[package]
+name = "drui"
+version = "0.1.0"
+edition = "2024"
+description = "A vector UI design tool written in Rust with egui"
+license = "LicenseRef-PolyForm-Noncommercial-1.0.0"
+repository = "https://github.com/anplusdre/drui"
+
+[dependencies]
+base64 = "0.23.1"
+earcutr = "0.5.0"
+eframe = "0.35.0"
+egui = { version = "0.35.0", features = ["serde"] }
+i_overlay = "9.0.1"
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "webp", "gif"] }
+pdf-writer = "0.12"
+resvg = "0.48.1"
+rfd = "0.17.2"
+unicode-bidi = "0.3"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+svg2pdf = "0.13.0"
+rodio = "0.23.0"
+raw-window-handle = "0.6"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+miniz_oxide = "0.8"
+ruzstd = "0.8"
+
+[target."cfg(windows)".dependencies]
+windows = { version = "0.62", features = ["Win32_Globalization", "Win32_System_Com", "Win32_Foundation"] }
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security_Cryptography", "Win32_UI_Input_Pointer", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+
+# egui/wgpu are unusably slow at opt-level 0 (jagged scrolling); optimize deps only, keep drui itself fast to rebuild
+[profile.dev.package."*"]
+opt-level = 2
