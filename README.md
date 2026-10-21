@@ -56,6 +56,8 @@ Legend: ✅ done and covered by a test, 🟡 works with limits, ⬜ not built ye
 - ✅ JSON files with migration of older files
 - ✅ Export PNG / JPG / SVG / PDF, per-layer export settings, batch export
 - ✅ Import SVG
+- ✅ Import `.fig` files (pages, layers, fills, strokes, effects, auto layout, text, components, prototype links, variables)
+- 🟡 `.fig` import: library components from other files, FigJam-only objects and plugin data are not carried over
 - 🟡 Comments: no attachments, per-message edit / delete or pin dragging
 
 ### Prototype and motion
