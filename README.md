@@ -88,12 +88,12 @@ Some parts of drui are not published here. I plan to sell them, so they stay pri
 - **Export to frontend.** Turn designs into code: React and Next.js apps, HTML and CSS, Tailwind, Kotlin (Jetpack Compose), Swift (SwiftUI), Flutter, and design tokens from your variables. This also includes the Code tab in Dev Mode. (The CSS properties and measurements in Dev Mode, and the one-file HTML export of a prototype, stay free.)
 - **Accounts.** The sign-in that switches those features on.
 
-None of this is free. If you want to use it, or you want to talk about licensing it for your team, get in touch through my GitHub profile ([@anplusdre](https://github.com/anplusdre)) or open an issue here.
+None of this is free. If you want to use it, or you want to talk about licensing it for your team, email me at [anplusdre@gmail.com](mailto:anplusdre@gmail.com), or find me on GitHub as [@anplusdre](https://github.com/anplusdre).
 
 Everything else, which is the whole editor, the prototype player, motion, `.fig` import and PNG/SVG/PDF export, is in this repository.
 
 ## License
 
-This code is under the [PolyForm Noncommercial License 1.0.0](LICENSE). In plain words: you can read it, run it, learn from it and change it for personal and other non-commercial use. You can't use it commercially or sell it. That makes it *source-available*, not "open source" in the strict sense. If you need to use it commercially, contact me as described above.
+This code is under the [PolyForm Noncommercial License 1.0.0](LICENSE). In plain words: you can read it, run it, learn from it and change it for personal and other non-commercial use. You can't use it commercially or sell it. That makes it *source-available*, not "open source" in the strict sense. If you need to use it commercially, email me at the address above.
 
 drui is an independent project. It is not affiliated with, endorsed by or sponsored by any other company or product. Product and company names that appear in the source or docs belong to their owners and are used only to say what drui can open or to give a point of comparison.
