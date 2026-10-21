@@ -1,7 +1,7 @@
 // The design system's palette: every surface grey and the text ramp live here and nowhere else, so restyling the app
 // is a change to this file. main.rs and fig.rs re-export these under the names the panels use.
-// The dark palette is Figma UI3 dark, one step darker by request (Figma: #2c2c2c / #383838 / #444444 / #1e1e1e); the light one is
-// Figma's light UI (white panels, #f5f5f5 fields, #e6e6e6 borders, a #e5e5e5 canvas, near-black text).
+// The dark palette is the reference dark theme, one step darker by request (reference: #2c2c2c / #383838 / #444444 / #1e1e1e); the light one is
+// The reference light theme (white panels, #f5f5f5 fields, #e6e6e6 borders, a #e5e5e5 canvas, near-black text).
 // The colours are functions because the interface can be switched between the two while the app runs.
 #![allow(non_snake_case)]
 use std::sync::atomic::{AtomicBool, Ordering};

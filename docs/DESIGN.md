@@ -1,6 +1,6 @@
 # drui design system
 
-drui copies **Figma UI3 (dark)**. This file is the contract for any UI work, by people or coding agents: use the shared tokens and widgets below, never invent sizes, colors or fonts. See it rendered with `drui --gallery` (`src/gallery.rs`).
+drui follows the look of **Figma's desktop app (dark)**; see the disclaimer in the README. This file is the contract for any UI work, by people or coding agents: use the shared tokens and widgets below, never invent sizes, colors or fonts. See it rendered with `drui --gallery` (`src/gallery.rs`).
 
 Source of truth in code: the grey/text palette in `src/theme.rs` (re-exported by `src/main.rs` and `src/fig.rs`; restyle there), other tokens in `src/main.rs` (top) and `src/fig.rs`; widgets in `src/fig.rs`, `src/picker.rs`, `src/comments.rs`, `src/glyphs.rs`; theme in `src/widgets.rs` (`apply_theme`). All numbers are CSS px (egui points) and were measured from the Figma desktop app with REA (see CLAUDE.md).
 
@@ -16,7 +16,7 @@ Source of truth in code: the grey/text palette in `src/theme.rs` (re-exported by
 
 ### Color (`theme.rs`)
 
-Figma UI3 dark is #2c2c2c / #383838 / #444444 / #1e1e1e; drui runs one step darker by request. Dropdown menus do not show a check on the selected item (the field shows the value).
+The reference dark theme is #2c2c2c / #383838 / #444444 / #1e1e1e; drui runs one step darker by request. Dropdown menus do not show a check on the selected item (the field shows the value).
 
 
 | token | value | use |

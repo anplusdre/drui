@@ -16,11 +16,11 @@ Notes for reading and changing the code. `src/` is one crate (egui/eframe 0.35).
 | `canvas.rs` | pointer tools, handles, pen/pencil, node edit, marquee, rulers/guides, context menu, present mode, text editor overlay, blend compositing |
 | `panels.rs` | rail, main menu, left panel (pages, layers, assets, history, comments), right panel (design, prototype), toolbar, HUD (hint, toast, help) |
 | `glyphs.rs` | icons (Lucide SVGs rasterized by resvg), flat section headers (`collapsing`), small widgets (`menu_item`, `tab_text`, ...) |
-| `widgets.rs` | theme (Inter + Inter SemiBold, Figma dark tokens), tool buttons |
+| `widgets.rs` | theme (Inter + Inter SemiBold, dark tokens), tool buttons |
 | `gallery.rs` | `drui --gallery`: the design tokens and every shared widget rendered, the visual half of docs/DESIGN.md |
-| `picker.rs` | Figma colour picker (square, hue, opacity, value row, swatches, popover placement) |
+| `picker.rs` | Colour picker (square, hue, opacity, value row, swatches, popover placement) |
 | `comments.rs` | canvas comments: pins, hover card, composer, thread |
-| `fig.rs` | Figma UI3 panel primitives and their measured numbers: rows, headers, labels, grid, number fields, dropdowns, segments, icon buttons, swatches, glyph-centred text (`ptext`) |
+| `fig.rs` | Panel primitives that follow Figma's desktop UI, with the numbers measured from screenshots: rows, headers, labels, grid, number fields, dropdowns, segments, icon buttons, swatches, glyph-centred text (`ptext`) |
 | `props.rs` | the Design tab's sections (layer header, Position, Layout, Appearance, Typography, Fill, Stroke, Effects, Layout guide, Page, multi-select, Selection colors) |
 | `ops.rs` | clipboard, align/distribute, flip, mask, images, selection colors |
 | `vector.rs` | pen tool, node editing, flatten, booleans |

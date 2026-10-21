@@ -1,4 +1,4 @@
-// The Design tab, laid out like Figma UI3's right panel (the numbers are in fig.rs): a layer header,
+// The Design tab, laid out like the reference app's right panel (the numbers are in fig.rs): a layer header,
 // then Position, Layout, Appearance, Fill, Stroke, Effects and Export sections on the two-column grid.
 use egui::{Align2, Color32, Pos2, Rect, Sense, Stroke, Vec2};
 

@@ -1,4 +1,4 @@
-// Figma UI3 panel primitives, measured from the desktop app (REA screenshots at 150%, values in CSS px):
+// Panel primitives, measured from screenshots of the reference desktop app (at 150%, values in CSS px):
 // 24px controls on #383838 with 5px corners, 11px values, 9.5px field labels, 11px semibold section titles,
 // 40px section headers, 16px left / 8px right padding, a two-column grid plus a 24px icon column, 1px #444
 // dividers. Panels lay rows out top to bottom on the full panel width and place controls by these numbers.

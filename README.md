@@ -100,4 +100,4 @@ Everything else, which is the whole editor, the prototype player, motion, `.fig`
 
 This code is under the [PolyForm Noncommercial License 1.0.0](LICENSE). In plain words: you can read it, run it, learn from it and change it for personal and other non-commercial use. You can't use it commercially or sell it. That makes it *source-available*, not "open source" in the strict sense. If you need to use it commercially, email me at the address above.
 
-drui is an independent project. It is not affiliated with, endorsed by or sponsored by any other company or product. Product and company names that appear in the source or docs belong to their owners and are used only to say what drui can open or to give a point of comparison.
+drui is an independent project. It is not affiliated with, endorsed by or sponsored by Figma, Inc. or any other company or product. Figma is a trademark of Figma, Inc. Product and company names that appear in the source or docs belong to their owners and are used only to say what drui can open or to give a point of comparison.

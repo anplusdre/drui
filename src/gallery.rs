@@ -148,7 +148,7 @@ fn caption(ui: &mut egui::Ui, text: &str) {
 
 fn tokens(ui: &mut egui::Ui) {
     ui.label(egui::RichText::new("drui design system").color(TEXT()).size(18.0).strong());
-    ui.label(egui::RichText::new("Figma UI3, dark. Tokens live in main.rs and fig.rs; see docs/DESIGN.md.").color(TEXT_SECONDARY()).size(11.0));
+    ui.label(egui::RichText::new("Dark theme. Tokens live in main.rs and fig.rs; see docs/DESIGN.md.").color(TEXT_SECONDARY()).size(11.0));
     caption(ui, "Color");
     let colors: [(&str, Color32, &str); 15] = [
         ("BG", BG(), "panels, toolbar, popovers"),
