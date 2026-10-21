@@ -1,23 +1,25 @@
 # drui
 
-A vector UI design tool written in Rust with [egui](https://github.com/emilk/egui). Native desktop app (Windows first), no web view.
+drui is a UI design tool I'm building in Rust. You draw frames, set up auto layout, make components and variants, wire up prototypes and export your work. It runs as a native desktop app (no browser, no Electron) and is built on [egui](https://github.com/emilk/egui).
 
-> **Work in progress.** Most of the editor works and is covered by tests, but the app is still being finished. The checklist below says what is done and what is not.
+It started as "can I build a design tool that feels fast and works the way I want?" and it has grown into something that is already useful every day. It is still unfinished, and the checklist below says plainly what works and what doesn't.
 
-Frames, auto layout, components and variants, vectors and booleans, prototypes, motion, export. Fonts are [Inter](https://rsms.me/inter/) (OFL), icons are [Lucide](https://lucide.dev) (ISC).
+Fonts are [Inter](https://rsms.me/inter/) (OFL) and icons are [Lucide](https://lucide.dev) (ISC).
 
-## Build and run
+## Try it
+
+You need a recent stable Rust toolchain (edition 2024). I develop and test on Windows 10/11. The rest is plain egui/wgpu, so other systems may work, but I haven't tried them.
 
 ```
-cargo run --release                 # opens design.json in the working directory (created on first save)
+cargo run --release                 # opens design.json in the current folder (created on first save)
 cargo run --release -- file.json    # open a file
-cargo run -- --gallery              # the design tokens and every shared widget (see docs/DESIGN.md)
+cargo run -- --gallery              # every colour, size and shared widget on one screen
 cargo test                          # logic tests plus headless runs of the whole UI
 ```
 
-Needs a recent stable Rust toolchain (edition 2024). Windows 10/11 is the platform it is developed and tested on; the rest is plain egui/wgpu and should port, but is not tested elsewhere.
+If you want to read the code, start with [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). If you want to change how something looks, read [docs/DESIGN.md](docs/DESIGN.md) first.
 
-## Status
+## What works today
 
 Legend: ✅ done and covered by a test, 🟡 works with limits, ⬜ not built yet.
 
@@ -77,17 +79,21 @@ Legend: ✅ done and covered by a test, 🟡 works with limits, ⬜ not built ye
 - ⬜ Verify every panel's measurements against the reference with a pixel diff
 - ⬜ Linux and macOS builds are untested
 
-## Not in this repository
+## What is not in this repository
 
-These parts of the app are kept out of the public source:
+Some parts of drui are not published here. I plan to sell them, so they stay private:
 
-- accounts and subscriptions
-- live co-editing between computers
-- code export to front-end frameworks
-- the local scripting API and plugins
+- **Collaboration.** Live co-editing: several people in one file, with cursors, cursor chat and shared edits.
+- **Claude CLI integration.** A local API that lets Claude Code read, debug and edit your design while you watch. It works on copies, never on your originals, and leaves notes saying why it changed things. Plugins and scripting go with it.
+- **Export to frontend.** Turn designs into code: React and Next.js apps, HTML and CSS, Tailwind, Kotlin (Jetpack Compose), Swift (SwiftUI), Flutter, and design tokens from your variables. This also includes the Code tab in Dev Mode. (The CSS properties and measurements in Dev Mode, and the one-file HTML export of a prototype, stay free.)
+- **Accounts.** The sign-in that switches those features on.
+
+None of this is free. If you want to use it, or you want to talk about licensing it for your team, get in touch through my GitHub profile ([@anplusdre](https://github.com/anplusdre)) or open an issue here.
+
+Everything else, which is the whole editor, the prototype player, motion, `.fig` import and PNG/SVG/PDF export, is in this repository.
 
 ## License
 
-[PolyForm Noncommercial License 1.0.0](LICENSE). You may use, study and change the source for any non-commercial purpose; commercial use and selling it are not allowed. This is *source-available*, not OSI "open source".
+This code is under the [PolyForm Noncommercial License 1.0.0](LICENSE). In plain words: you can read it, run it, learn from it and change it for personal and other non-commercial use. You can't use it commercially or sell it. That makes it *source-available*, not "open source" in the strict sense. If you need to use it commercially, contact me as described above.
 
-drui is an independent project. It is not affiliated with, endorsed by or sponsored by any other company or product. Product and company names mentioned in the source or the docs belong to their owners and are used only to describe compatibility or a point of comparison.
+drui is an independent project. It is not affiliated with, endorsed by or sponsored by any other company or product. Product and company names that appear in the source or docs belong to their owners and are used only to say what drui can open or to give a point of comparison.
