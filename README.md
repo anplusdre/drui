@@ -6,6 +6,10 @@ It started as "can I build a design tool that feels fast and works the way I wan
 
 Fonts are [Inter](https://rsms.me/inter/) (OFL) and icons are [Lucide](https://lucide.dev) (ISC).
 
+## The plan
+
+My goal is to finish every feature on the checklist below by the **end of October 2026**. Anything not done yet is an open [issue](https://github.com/anplusdre/drui/issues) in the [October 2026 milestone](https://github.com/anplusdre/drui/milestone/1), so you can follow what is left, how far along it is, and what is being worked on next.
+
 ## Try it
 
 You need a recent stable Rust toolchain (edition 2024). I develop and test on Windows 10/11. The rest is plain egui/wgpu, so other systems may work, but I haven't tried them.
