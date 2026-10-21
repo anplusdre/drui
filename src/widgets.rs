@@ -33,7 +33,10 @@ pub fn apply_theme(ctx: &egui::Context) {
     ctx.all_styles_mut(|s| {
         // egui's debug builds outline a widget in red for a frame whenever the widget at a rect changes id (a label turning
         // into a text field, a menu opening in place): normal for this UI, so the warning is off
-        s.debug.warn_if_rect_changes_id = false;
+        #[cfg(debug_assertions)] // the field only exists in egui's debug builds
+        {
+            s.debug.warn_if_rect_changes_id = false;
+        }
         s.spacing.item_spacing = Vec2::new(8.0, 6.0);
         s.spacing.button_padding = Vec2::new(8.0, 4.0);
         s.spacing.interact_size.y = 24.0;

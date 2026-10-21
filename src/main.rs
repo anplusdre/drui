@@ -1,3 +1,4 @@
+#![cfg_attr(all(not(debug_assertions), target_os = "windows"), windows_subsystem = "windows")] // no console window behind a release build
 #![allow(dead_code)] // some helpers are only used by parts that are not in this tree
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;

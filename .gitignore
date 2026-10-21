@@ -5,3 +5,4 @@ src.bak/
 /design.json
 /.claude/settings.local.json
 /.claude/commands/
+/dist/
