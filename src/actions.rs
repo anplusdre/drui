@@ -84,12 +84,39 @@ const COMMANDS: &[(&str, &str, u8, Run)] = &[
             a.import_sketch(p);
         }
     }),
+    ("Toggle REST API", "", 0, |a| {
+        if let Some(ctx) = a.ctx.clone() {
+            a.toggle_api(&ctx, 0);
+        }
+    }),
     ("Present", "", 0, |a| {
         if let Some(f) = a.single().map(|i| a.shapes[i].id).or_else(|| a.shapes.iter().find(|s| s.kind == Kind::Frame && s.parent.is_none()).map(|s| s.id)) {
             a.start_present(f);
         }
     }),
 ];
+
+// what the palette offers that makes no sense from a script: file dialogs, tools that wait for the pointer, the app's own windows
+const NOT_FOR_API: &[&str] = &[
+    "Import Figma file (.fig)…", "Import Sketch file (.sketch)…", "Shape builder", "Cut tool", "Eraser", "Paint tool", "Eyedropper", "Quick insert", "Present", "Account…",
+    "Toggle REST API", "Open plugins folder",
+    // these write into the main component, which can be the person's design while the selected instance is in an edit copy
+    "Push overrides to main component", "Restore main component",
+];
+
+// the actions a script can run (GET /actions): name, shortcut, what must be selected (0 nothing, 1 a layer, 2 several)
+pub(crate) fn api_commands() -> Vec<serde_json::Value> {
+    let mut v: Vec<_> = COMMANDS.iter().filter(|c| !NOT_FOR_API.contains(&c.0)).map(|c| serde_json::json!({ "name": c.0, "shortcut": c.1, "needs": c.2 })).collect();
+    v.push(serde_json::json!({ "name": "Offset path", "needs": 1, "args": "value: px" }));
+    v.push(serde_json::json!({ "name": "Rename", "needs": 1, "args": "pattern: # = number, * = old name" }));
+    v.push(serde_json::json!({ "name": "Replace", "needs": 1, "args": "from, to: text in the selected layers" }));
+    v
+}
+
+// what the named action needs selected; None for a name that is not a palette action
+pub(crate) fn command_needs(name: &str) -> Option<u8> {
+    COMMANDS.iter().find(|c| c.0.eq_ignore_ascii_case(name)).map(|c| c.2)
+}
 
 // "Offset path 8" / "Offset path -4": a command with a number typed after its name
 fn offset_arg(query: &str) -> Option<f32> {
@@ -140,6 +167,21 @@ impl App {
         }
         let tail = if skipped > 0 { format!(", {skipped} with mixed styles skipped") } else { String::new() };
         self.status = format!("replaced in {layers} text layer{}{tail}", if layers == 1 { "" } else { "s" });
+    }
+
+    // runs a palette action by name for the REST API
+    pub(crate) fn run_api_command(&mut self, name: &str) -> Result<(), String> {
+        let Some(&(n, _, needs, run)) = COMMANDS.iter().find(|c| c.0.eq_ignore_ascii_case(name.trim())) else {
+            return Err(format!("no action called {name:?}: GET /actions lists them"));
+        };
+        if NOT_FOR_API.contains(&n) {
+            return Err(format!("{n} needs the person at the keyboard (a dialog or the pointer)"));
+        }
+        if !self.can_run(needs) {
+            return Err(format!("{n} needs {} selected: send \"ids\"", if needs == 1 { "a layer" } else { "several layers" }));
+        }
+        run(self);
+        Ok(())
     }
 
     pub fn open_actions(&mut self) {

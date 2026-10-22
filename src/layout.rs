@@ -52,6 +52,7 @@ impl App {
                 break;
             }
         }
+        self.place_notes();
     }
 
     // layers that follow an effect, text or grid style take its values; a style that no longer exists is let go

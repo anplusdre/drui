@@ -2,7 +2,7 @@
 ; Build the release first:   cargo build --release
 ; Then compile this file:    "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" tools\installer\drui.iss
 ; The installer is written to dist\drui-setup-<version>.exe
-#define AppVersion "0.1.0"
+#define AppVersion "0.2.0"
 
 [Setup]
 AppId={{6F0D2B1E-4C7A-4B7E-9D3A-5E2C8A1F7B40}

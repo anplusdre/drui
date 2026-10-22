@@ -702,6 +702,11 @@ impl App {
                 ui.close();
             }
         });
+        crate::glyphs::menu_sep(ui);
+        if menu_item(ui, None, if self.api.is_some() { "Stop REST API" } else { "Start REST API" }, "", true) {
+            self.toggle_api(&ctx, 0);
+            ui.close();
+        }
         crate::glyphs::menu_submenu(ui, None, "Color profile", |ui| {
             for (v, label) in [(0u8, "sRGB"), (1, "Display P3")] {
                 if crate::glyphs::menu_check(ui, self.color_profile == v, label, "") {
