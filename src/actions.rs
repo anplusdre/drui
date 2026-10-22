@@ -100,6 +100,8 @@ const COMMANDS: &[(&str, &str, u8, Run)] = &[
 const NOT_FOR_API: &[&str] = &[
     "Import Figma file (.fig)…", "Import Sketch file (.sketch)…", "Shape builder", "Cut tool", "Eraser", "Paint tool", "Eyedropper", "Quick insert", "Present", "Account…",
     "Toggle REST API", "Open plugins folder",
+    // these write into the main component, which can be the person's design while the selected instance is in an edit copy
+    "Push overrides to main component", "Restore main component",
 ];
 
 // the actions a script can run (GET /actions): name, shortcut, what must be selected (0 nothing, 1 a layer, 2 several)

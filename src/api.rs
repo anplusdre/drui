@@ -52,6 +52,21 @@ fn routes() -> Vec<&'static str> {
     .collect()
 }
 
+// one of the MAX_CONNS connection slots, given back on drop
+struct Slot(Arc<AtomicUsize>);
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+// whether a status line says that an open, import or library step went wrong
+fn failed(status: &str) -> bool {
+    let s = status.to_lowercase();
+    ["fail", "can't", "cannot", "could not", "error"].iter().any(|w| s.contains(w))
+}
+
 // a token bucket shared by every connection
 pub(crate) struct Bucket {
     pub(crate) tokens: f64,
@@ -183,8 +198,8 @@ pub fn start(ctx: egui::Context, port: u16) -> Result<Api, String> {
             live.fetch_add(1, Ordering::SeqCst);
             let (tx, ctx, t, bucket, live) = (tx.clone(), ctx.clone(), t.clone(), bucket.clone(), live.clone());
             std::thread::spawn(move || {
+                let _slot = Slot(live); // released when the thread ends, however it ends
                 serve(conn, port, &t, tx, ctx, &bucket);
-                live.fetch_sub(1, Ordering::SeqCst);
             });
         }
     });
@@ -194,7 +209,7 @@ pub fn start(ctx: egui::Context, port: u16) -> Result<Api, String> {
 fn serve(mut conn: TcpStream, port: u16, token: &str, tx: Sender<Req>, ctx: egui::Context, bucket: &Mutex<Bucket>) {
     let _ = conn.set_read_timeout(Some(Duration::from_secs(10)));
     let resp = match read_request(&mut conn, port, token) {
-        Ok(_) if !bucket.lock().map(|mut b| b.take()).unwrap_or(false) => Resp::err(429, format!("too many requests: at most {RATE} a second")),
+        Ok(_) if !bucket.lock().unwrap_or_else(|e| e.into_inner()).take() => Resp::err(429, format!("too many requests: at most {RATE} a second")),
         Ok((method, target, body)) => {
             let (path, query) = target.split_once('?').unwrap_or((target.as_str(), ""));
             let query: HashMap<String, String> = query.split('&').filter_map(|kv| kv.split_once('=')).map(|(k, v)| (k.to_string(), v.to_string())).collect();
@@ -402,6 +417,7 @@ impl App {
         let seg: Vec<&str> = r.path.iter().map(String::as_str).collect();
         let body = || -> Result<Value, Resp> { serde_json::from_slice(&r.body).map_err(|e| Resp::err(400, format!("body is not JSON: {e}"))) };
         let id_of = |s: &str| s.parse::<u64>().map_err(|_| Resp::err(400, "ids are numbers"));
+        let sel_before = self.sel.clone();
         let res: Result<Resp, Resp> = (|| match (r.method.as_str(), seg.as_slice()) {
             ("GET", []) => Ok(Resp::json(
                 200,
@@ -427,14 +443,21 @@ impl App {
                 if path.extension().and_then(|e| e.to_str()) != Some("json") {
                     return Err(Resp::err(400, "drui files are .json"));
                 }
+                // another file of the person's is not overwritten without being told to
+                if path != self.file && path.exists() && body().ok().and_then(|v| v["overwrite"].as_bool()) != Some(true) {
+                    return Err(Resp::err(409, "that file exists: send \"overwrite\": true only when the person asked for it"));
+                }
                 self.save_to(path);
+                if failed(&self.status) {
+                    return Err(Resp::err(500, self.status.clone()));
+                }
                 Ok(Resp::json(200, json!({ "status": self.status, "file": self.file.display().to_string() })))
             }
             ("POST", ["open"]) | ("POST", ["import"]) => {
                 let v = body()?;
                 let path = PathBuf::from(v["path"].as_str().ok_or_else(|| Resp::err(400, "expected {\"path\": \"file\"}"))?);
                 // replacing the open document would throw away what the person has not saved
-                if !self.undo.is_empty() && v["discard"].as_bool() != Some(true) {
+                if (self.undo.len() != self.saved_undo || self.pending.is_some()) && v["discard"].as_bool() != Some(true) {
                     return Err(Resp::err(409, "the open document has unsaved edits: POST /save first, or send \"discard\": true"));
                 }
                 match (seg[0], path.extension().and_then(|e| e.to_str()).map(str::to_lowercase).as_deref()) {
@@ -443,6 +466,11 @@ impl App {
                     ("import", _) => return Err(Resp::err(400, "import takes a .fig or .sketch file; /open takes a drui file")),
                     _ => self.load_from(path),
                 }
+                if failed(&self.status) {
+                    return Err(Resp::err(400, self.status.clone()));
+                }
+                // ids of the old document mean nothing in the new one
+                self.api_owned.clear();
                 Ok(Resp::json(200, json!({ "status": self.status, "file": self.file.display().to_string() })))
             }
             ("POST", ["pages"]) => {
@@ -643,6 +671,10 @@ impl App {
         // an edit leaves the layout to be redone and the size cache stale
         if matches!(r.method.as_str(), "POST" | "PUT" | "PATCH" | "DELETE") {
             self.sizes.clear();
+        }
+        // a refused request leaves the person's selection as it was
+        if res.is_err() {
+            self.sel = sel_before;
         }
         res.unwrap_or_else(|e| e)
     }

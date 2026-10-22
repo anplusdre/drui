@@ -39,6 +39,16 @@ impl App {
         if let Some(k) = obj.keys().find(|k| !known.contains(&k.as_str())) {
             return Err(format!("unknown setting {k:?}: GET /view lists them"));
         }
+        // a value of the wrong type is an error, not something to skip
+        let bools = ["left_min", "hide_ui", "light_ui", "snap", "snap_pixels", "pixel_grid", "rulers", "layout_guides", "prop_labels", "labels", "spell", "outlines", "outline_hidden", "outline_bounds", "show_comments", "show_resolved"];
+        let numbers = ["zoom", "nudge_small", "nudge_big", "pixel_preview", "handle_mirror"];
+        let strings = ["mode", "left_tab", "color_profile"];
+        for (k, val) in obj {
+            let ok = if bools.contains(&k.as_str()) { val.is_boolean() } else if numbers.contains(&k.as_str()) { val.as_f64().is_some_and(|n| n.is_finite() && (n > 0.0 || matches!(k.as_str(), "pixel_preview" | "handle_mirror"))) } else if strings.contains(&k.as_str()) { val.as_str().is_some_and(|s| !s.is_empty()) } else { true };
+            if !ok {
+                return Err(format!("{k:?} has the wrong type or value: GET /view shows what each takes"));
+            }
+        }
         let mode = match v["mode"].as_str() {
             Some(m) => Some(crate::Mode::ALL.iter().find(|x| x.1.to_lowercase().starts_with(&m.to_lowercase())).ok_or("mode is design, draw, motion or dev")?.0),
             None => None,
@@ -376,6 +386,7 @@ impl App {
                 self.undo.push(snap);
                 self.redo.clear();
                 self.shapes = self.versions[i].shapes.clone();
+                self.api_owned.clear(); // the old ids may belong to the person's layers now
                 self.sel.clear();
                 self.sizes.clear();
                 self.status = format!("restored {}", self.versions[i].name);
@@ -399,14 +410,20 @@ impl App {
             ("POST", ["branches", i, "review"]) => {
                 let i = index(i, self.branches.len())?;
                 let who = body()?["reviewer"].as_str().filter(|w| !w.trim().is_empty()).ok_or_else(|| Resp::err(400, "expected {\"reviewer\": \"name\"}"))?.to_string();
-                // asking is the agent's to do; approving is the person's alone
-                self.branches[i].review = Review { state: 1, reviewer: who, secs: now(), ..Review::default() };
+                // asking is the agent's to do; approving is the person's alone, and an answer is not overwritten
+                if !self.can_merge(i) || matches!(self.branches[i].review.state, 2 | 3) {
+                    return Err(Resp::err(403, "main has no review, and an answered review is the person's: it is not asked again from here"));
+                }
+                self.request_review(i, &who);
                 Ok(Resp::json(200, json!({ "ok": true })))
             }
             ("PUT", ["branches", i, "review"]) => {
                 let i = index(i, self.branches.len())?;
                 let v = body()?;
                 // the agent may hand the request to someone else or withdraw it; an answer (approve, send back) is the person's
+                if !self.can_merge(i) || matches!(self.branches[i].review.state, 2 | 3) {
+                    return Err(Resp::err(403, "main has no review, and an answered review is the person's"));
+                }
                 match v["state"].as_str() {
                     Some("withdrawn") => self.branches[i].review = Review::default(),
                     Some("requested") => {
@@ -426,6 +443,7 @@ impl App {
                     return Err(Resp::err(403, "the branch needs an approved review, and only the person can approve it in the Branches window"));
                 }
                 let notes = self.merge_branch(i);
+                self.api_owned.clear();
                 Ok(Resp::json(200, json!({ "conflicts": notes })))
             }
             ("DELETE", ["branches", i]) => {

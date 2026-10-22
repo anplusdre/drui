@@ -260,6 +260,7 @@ struct App {
     pan: Vec2,
     zoom: f32,
     undo: Vec<Snap>,
+    saved_undo: usize, // how many undo steps there were when the file was last saved or opened: more or fewer means unsaved edits
     redo: Vec<Snap>,
     pending: Option<Snap>, // pre-gesture snapshot, committed once the pointer is released
     grad_edit: Option<(u64, bool, usize)>, // the gradient paint whose handles are on the canvas: layer id, is a stroke, paint index
@@ -456,6 +457,7 @@ impl Default for App {
             undid: false,
             status: String::new(),
             themed: false,
+            saved_undo: 0,
             file: PathBuf::from(FILE),
             clipboard: vec![],
             search_open: false,
@@ -1016,12 +1018,13 @@ impl App {
                 if !cfg!(test) {
                     files::note_recent(&path);
                 }
+                self.saved_undo = self.undo.len();
+                self.file = path.clone();
                 format!("saved {}", path.display())
             }
             Ok(Err(e)) => format!("save failed: {e}"),
             Err(e) => format!("save failed: {e}"),
         };
-        self.file = path;
     }
 
     fn load_from(&mut self, path: PathBuf) {
@@ -1093,6 +1096,7 @@ impl App {
     // a new document: nothing of the old one is undoable
     fn reset_session(&mut self) {
         self.undo.clear();
+        self.saved_undo = 0;
         self.redo.clear();
         self.reset_view();
     }

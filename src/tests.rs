@@ -3702,6 +3702,9 @@ fn rest_api_runs_actions_pages_undo_files() {
         // files: no overwriting of unsaved work, no saving over a non-drui file
         assert_eq!(http(port, t, &host, "POST", "/open", r#"{"path":"x.json"}"#).0, 409);
         assert_eq!(http(port, t, &host, "POST", "/import", r#"{"path":"x.png","discard":true}"#).0, 400);
+        assert_eq!(http(port, t, &host, "POST", "/open", r#"{"path":"does-not-exist.json","discard":true}"#).0, 400, "a failed open is not a 200");
+        let (c, _) = http(port, t, &host, "POST", "/actions", r#"{"name":"Push overrides to main component","ids":[]}"#);
+        assert_eq!(c, 400, "not for scripts");
         assert_eq!(http(port, t, &host, "POST", "/save", r#"{"path":"x.exe"}"#).0, 400);
         assert_eq!(http(port, t, &host, "POST", "/undo", "").0, 200);
         ids
@@ -3809,6 +3812,8 @@ fn rest_api_view_motion_tools_and_style_edits() {
         let v = json(&b);
         assert_eq!((v["rulers"].clone(), v["left_tab"].clone(), v["nudge_big"].clone(), v["guides"][0]["pos"].clone()), (false.into(), "history".into(), 20.0.into(), 100.0.into()));
         assert_eq!(http(port, t, &host, "PUT", "/view", r#"{"nonsense":1}"#).0, 400);
+        assert_eq!(http(port, t, &host, "PUT", "/view", r#"{"rulers":"false"}"#).0, 400, "wrong type");
+        assert_eq!(http(port, t, &host, "PUT", "/view", r#"{"mode":""}"#).0, 400);
         assert_eq!(http(port, t, &host, "PUT", "/view", r#"{"left_tab":"sideways"}"#).0, 400);
         // the Motion timeline
         let (c, b) = http(port, t, &host, "PUT", "/motion", r#"{"length":3000,"loop":true,"time":9000}"#);
