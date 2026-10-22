@@ -24,6 +24,8 @@ mod figimport;
 mod kiwi;
 mod video;
 mod anim;
+mod api;
+mod api_more;
 mod branches;
 mod audio;
 mod canvas;
@@ -333,6 +335,9 @@ struct App {
     last_shape: Kind, // the shape tool the toolbar button offers
     shown_status: String, // the toast currently on screen
     status_t: f64,
+    api: Option<api::Api>, // the local REST API (--api, or Actions > Toggle REST API)
+    api_owned: HashSet<u64>, // top-level layers made through the API: the agent may edit them without a claude_edit copy
+    api_want: Option<u16>, // start it on the next frame (needs the egui context); 0 = any free port
     ctx: Option<egui::Context>,
     net_cursor: Option<Pos2>, // this peer's pointer in world space, sent to the others
     user: String, // the name other people see in a live session
@@ -520,6 +525,9 @@ impl Default for App {
             last_shape: Kind::Rect,
             shown_status: String::new(),
             status_t: 0.0,
+            api: None,
+            api_owned: HashSet::new(),
+            api_want: None,
             ctx: None,
             net_cursor: None,
             user: std::env::var("USERNAME").or_else(|_| std::env::var("USER")).unwrap_or_else(|_| "guest".into()),
@@ -1711,6 +1719,9 @@ impl eframe::App for App {
             self.themed = true;
         }
         self.ctx = Some(ctx.clone());
+        if let Some(port) = self.api_want.take() {
+            self.toggle_api(&ctx, port);
+        }
         self.run_frame(ui);
     }
 }
@@ -1732,6 +1743,7 @@ impl App {
         let before_page = self.cur;
         self.handle_events(&ctx);
         self.shortcuts(&ctx);
+        self.poll_api(&ctx);
         // an undo or redo just replaced the shapes: that is not a new edit
         let undid = std::mem::take(&mut self.undid);
         let before = if undid { self.shapes.clone() } else { before };
@@ -1858,6 +1870,10 @@ fn main() -> eframe::Result {
             app.gallery = args.iter().any(|a| a == "--gallery");
             app.light_ui = args.iter().any(|a| a == "--light");
             app.files.open = args.iter().any(|a| a == "--files"); // the files browser open from the start
+            // `--api` or `--api 7440`: serve the local REST API (port 0 / omitted: any free port)
+            if let Some(i) = args.iter().position(|a| a == "--api") {
+                app.api_want = Some(args.get(i + 1).and_then(|p| p.parse().ok()).unwrap_or(0));
+            }
             if let Some(m) = flag("--mode") {
                 if let Some((mode, ..)) = Mode::ALL.iter().find(|(_, label, _)| label.to_lowercase().starts_with(&m)) {
                     app.set_mode(*mode);

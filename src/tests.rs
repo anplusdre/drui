@@ -3520,7 +3520,343 @@ fn http(port: u16, token: Option<&str>, host: &str, method: &str, path: &str, bo
     (code, out[split + 4..].to_vec())
 }
 
+#[test]
+fn rest_api_edits_comments_export_and_plugins() {
+    let ctx = egui::Context::default();
+    let mut a = App::default();
+    a.ctx = Some(ctx.clone());
+    a.toggle_api(&ctx, 0);
+    let (port, token) = (a.api.as_ref().unwrap().port, a.api.as_ref().unwrap().token.clone());
+    let host = format!("127.0.0.1:{port}");
 
+    // the client runs on its own thread; the app answers between its frames, as `run_frame` does
+    let (h2, t2) = (host.clone(), token.clone());
+    let client = std::thread::spawn(move || {
+        let t = Some(t2.as_str());
+        let json = |b: &[u8]| serde_json::from_slice::<serde_json::Value>(b).unwrap();
+        let mut seen = vec![];
+        seen.push(http(port, None, &h2, "GET", "/layers", "").0); // no token
+        seen.push(http(port, Some("wrong"), &h2, "GET", "/layers", "").0); // wrong token
+        seen.push(http(port, t, "evil.example", "GET", "/layers", "").0); // DNS-rebinding style Host
+        let (c, b) = http(port, t, &h2, "POST", "/layers", r#"{"name":"Box","kind":"Rect","size":[40,20]}"#);
+        assert_eq!(c, 200);
+        let id = json(&b)["id"].as_u64().unwrap();
+        let (_, b) = http(port, t, &h2, "GET", &format!("/layers/{id}"), "");
+        assert_eq!(json(&b)["name"], "Box");
+        assert_eq!(http(port, t, &h2, "PATCH", &format!("/layers/{id}"), r#"{"name":"Renamed","opacity":0.5}"#).0, 200);
+        let (_, b) = http(port, t, &h2, "GET", "/layers", "");
+        assert_eq!(json(&b).as_array().unwrap().len(), 1);
+        assert_eq!(json(&b)[0]["name"], "Renamed");
+        // a frame with a child made in one patch, the child pointing at the frame by ref
+        let patch = r#"{"add":[{"ref":"f","kind":"Frame","name":"F","size":[100,100]},{"parent_ref":"f","kind":"Rect","name":"In","size":[10,10]}]}"#;
+        assert_eq!(http(port, t, &h2, "POST", "/patch", patch).0, 200);
+        assert_eq!(http(port, t, &h2, "POST", "/patch", r#"{"add":[{"parent_ref":"nope"}]}"#).0, 400);
+        assert_eq!(http(port, t, &h2, "PUT", "/selection", &format!("{{\"ids\":[{id},99999]}}")).0, 200);
+        let (_, b) = http(port, t, &h2, "GET", "/selection", "");
+        assert_eq!(json(&b)["ids"], serde_json::json!([id]));
+        let (c, png) = http(port, t, &h2, "GET", &format!("/export/{id}?format=png&scale=2"), "");
+        assert_eq!((c, &png[1..4]), (200, &b"PNG"[..]));
+        let (c, b) = http(port, t, &h2, "POST", "/comments", r#"{"text":"hello","x":5,"y":6}"#);
+        assert_eq!(c, 200);
+        let cid = json(&b)["id"].as_u64().unwrap();
+        assert_eq!(http(port, t, &h2, "PATCH", &format!("/comments/{cid}"), r#"{"resolved":true,"reply":"ok"}"#).0, 200);
+        let (_, b) = http(port, t, &h2, "GET", "/comments", "");
+        assert_eq!((json(&b)[0]["resolved"].clone(), json(&b)[0]["replies"].as_array().unwrap().len()), (serde_json::json!(true), 1));
+        assert_eq!(http(port, t, &h2, "DELETE", &format!("/layers/{id}"), "").0, 200);
+        assert_eq!(http(port, t, &h2, "DELETE", &format!("/layers/{id}"), "").0, 404);
+        assert_eq!(http(port, t, &h2, "GET", "/nothing", "").0, 404);
+        seen
+    });
+    while !client.is_finished() {
+        a.poll_api(&ctx);
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    assert_eq!(client.join().unwrap(), vec![401, 401, 403]);
+    // what the client built is in the document: the frame and its child, the box is gone
+    assert!(a.shapes.iter().any(|s| s.name == "In" && s.parent.is_some()));
+    assert!(!a.shapes.iter().any(|s| s.name == "Renamed"));
+
+}
+
+#[test]
+fn rest_api_edits_a_claude_edit_copy_and_leaves_notes() {
+    let ctx = egui::Context::default();
+    let mut a = App::default();
+    a.ctx = Some(ctx.clone());
+    // an existing design the agent did not make: a frame with a rect and a label
+    let fid = a.new_id();
+    let mut f = Shape::new(Kind::Frame, fid, 1, egui::pos2(100.0, 50.0), None);
+    f.name = "Login".into();
+    f.size = egui::vec2(300.0, 200.0);
+    let rid = a.new_id();
+    let mut r = Shape::new(Kind::Rect, rid, 2, egui::pos2(10.0, 10.0), Some(fid));
+    r.name = "Button".into();
+    r.size = egui::vec2(100.0, 40.0);
+    a.shapes.push(f);
+    a.shapes.push(r);
+    a.toggle_api(&ctx, 0);
+    let (port, token) = (a.api.as_ref().unwrap().port, a.api.as_ref().unwrap().token.clone());
+    let host = format!("127.0.0.1:{port}");
+
+    let client = std::thread::spawn(move || {
+        let t = Some(token.as_str());
+        let json = |b: &[u8]| serde_json::from_slice::<serde_json::Value>(b).unwrap();
+        // the original is protected, in all three ways to write
+        assert_eq!(http(port, t, &host, "PATCH", &format!("/layers/{rid}"), r##"{"fill":"#ff0000"}"##).0, 403);
+        assert_eq!(http(port, t, &host, "POST", "/patch", &format!(r#"{{"set":[{{"id":{rid},"w":5}}]}}"#)).0, 403);
+        assert_eq!(http(port, t, &host, "DELETE", &format!("/layers/{rid}"), "").0, 403);
+        let (c, b) = http(port, t, &host, "POST", "/claude_edit", &format!(r#"{{"id":{fid}}}"#));
+        assert_eq!(c, 200);
+        let v = json(&b);
+        let (cid, crid) = (v["id"].as_u64().unwrap(), v["ids"][rid.to_string()].as_u64().unwrap());
+        assert_eq!((v["name"].as_str().unwrap(), v["existing"].as_bool().unwrap()), ("Login claude_edit", false));
+        assert_eq!(v["outline"]["children"][0]["name"], "Button");
+        // asking again returns the same copy
+        let (_, b) = http(port, t, &host, "POST", "/claude_edit", &format!(r#"{{"id":{fid}}}"#));
+        assert_eq!((json(&b)["id"].as_u64().unwrap(), json(&b)["existing"].as_bool().unwrap()), (cid, true));
+        // the copy can be edited, with the shorthands
+        assert_eq!(http(port, t, &host, "PATCH", &format!("/layers/{crid}"), r##"{"fill":"#ff0000","w":120,"radius":6}"##).0, 200);
+        // a note beside the changed layer, and a second one that must not sit on the first
+        let (c, b) = http(port, t, &host, "POST", "/notes", &format!(r#"{{"text":"Wider so the label fits.","near":{crid},"side":"right"}}"#));
+        assert_eq!(c, 200);
+        let n1 = json(&b);
+        let (_, b) = http(port, t, &host, "POST", "/notes", &format!(r#"{{"text":"Red follows the brand.","near":{crid},"side":"right"}}"#));
+        let n2 = json(&b);
+        assert!(n2["y"].as_f64().unwrap() > n1["y"].as_f64().unwrap() + 20.0, "notes stack: {n1} {n2}");
+        assert_eq!(http(port, t, &host, "POST", "/notes", r#"{"text":""}"#).0, 400);
+        // a note can be removed again, and the outline is compact
+        assert_eq!(http(port, t, &host, "DELETE", &format!("/layers/{}", n2["id"]), "").0, 200);
+        let (_, b) = http(port, t, &host, "GET", "/outline?depth=0", "");
+        let o = json(&b);
+        let editable: Vec<(String, bool)> = o.as_array().unwrap().iter().map(|n| (n["name"].as_str().unwrap().to_string(), n["editable"].as_bool().unwrap())).collect();
+        assert!(editable.contains(&("Login".into(), false)) && editable.contains(&("Login claude_edit".into(), true)), "{editable:?}");
+        assert_eq!(http(port, t, &host, "GET", "/guide", "").0, 200);
+        (cid, crid)
+    });
+    while !client.is_finished() {
+        a.poll_api(&ctx);
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    let (cid, crid) = client.join().unwrap();
+    // the original is untouched, the copy carries the edit and sits beside it
+    let orig = &a.shapes[a.index_of(rid).unwrap()];
+    assert_eq!((orig.size.x, orig.fills.len()), (100.0, 1));
+    let copy = &a.shapes[a.index_of(crid).unwrap()];
+    assert_eq!((copy.size.x, copy.radius[0], copy.parent), (120.0, 6.0, Some(cid)));
+    assert!(matches!(copy.fills[0].kind, PaintKind::Solid(c) if c == egui::Color32::RED));
+    assert!(a.shapes[a.index_of(cid).unwrap()].pos.x >= 100.0 + 300.0, "placed right of the original");
+    assert_eq!(a.shapes.iter().filter(|s| s.name.starts_with("claude_note")).count(), 1);
+}
+
+#[test]
+fn the_api_rate_limit_lets_a_burst_through_and_then_refuses() {
+    let mut b = crate::api::Bucket { tokens: 60.0, at: std::time::Instant::now() };
+    let allowed = (0..200).filter(|_| b.take()).count();
+    assert!((60..=62).contains(&allowed), "a burst of 60, then the refill rate: {allowed}");
+    b.at -= std::time::Duration::from_secs(1);
+    assert!(b.take(), "a second later requests are served again");
+}
+
+#[test]
+fn rest_api_runs_actions_pages_undo_files() {
+    let ctx = egui::Context::default();
+    let mut a = App::default();
+    a.ctx = Some(ctx.clone());
+    // a layer of the person's own, and an unsaved edit
+    let own = a.new_id();
+    let mut f = Shape::new(Kind::Frame, own, 1, egui::pos2(0.0, 0.0), None);
+    f.name = "Mine".into();
+    a.shapes.push(f);
+    a.undo.push(a.snap());
+    a.toggle_api(&ctx, 0);
+    let (port, token) = (a.api.as_ref().unwrap().port, a.api.as_ref().unwrap().token.clone());
+    let host = format!("127.0.0.1:{port}");
+
+    let client = std::thread::spawn(move || {
+        let t = Some(token.as_str());
+        let json = |b: &[u8]| serde_json::from_slice::<serde_json::Value>(b).unwrap();
+        let (c, b) = http(port, t, &host, "GET", "/actions", "");
+        let names: Vec<String> = json(&b).as_array().unwrap().iter().map(|n| n["name"].as_str().unwrap().to_string()).collect();
+        assert!(c == 200 && names.contains(&"Group selection".to_string()) && !names.contains(&"Present".to_string()) && !names.iter().any(|n| n.starts_with("Import")), "{names:?}");
+        // two layers of the agent's own: align them, group them
+        let mut ids = vec![];
+        for x in [0, 50] {
+            let (_, b) = http(port, t, &host, "POST", "/layers", &format!(r#"{{"kind":"Rect","x":{x},"y":0,"w":10,"h":10}}"#));
+            ids.push(json(&b)["id"].as_u64().unwrap());
+        }
+        let both = format!("[{},{}]", ids[0], ids[1]);
+        assert_eq!(http(port, t, &host, "POST", "/align", &format!(r#"{{"op":"right","ids":{both}}}"#)).0, 200);
+        assert_eq!(http(port, t, &host, "POST", "/align", r#"{"op":"sideways"}"#).0, 400);
+        assert_eq!(http(port, t, &host, "POST", "/actions", &format!(r#"{{"name":"Group selection","ids":{both}}}"#)).0, 200);
+        assert_eq!(http(port, t, &host, "POST", "/actions", r#"{"name":"Group selection","ids":[]}"#).0, 400, "needs a selection");
+        assert_eq!(http(port, t, &host, "POST", "/actions", r#"{"name":"Present"}"#).0, 400, "not for scripts");
+        // the person's own layer is protected from actions and arrangement too
+        assert_eq!(http(port, t, &host, "POST", "/actions", &format!(r#"{{"name":"Flip horizontal","ids":[{own}]}}"#)).0, 403);
+        assert_eq!(http(port, t, &host, "POST", "/align", &format!(r#"{{"op":"left","ids":[{own}]}}"#)).0, 403);
+        // pages: add and name one, go back, delete the empty one; a page with layers stays
+        assert_eq!(http(port, t, &host, "POST", "/pages", r#"{"name":"Second"}"#).0, 200);
+        assert_eq!(http(port, t, &host, "PUT", "/pages/0", "").0, 200);
+        assert_eq!(http(port, t, &host, "DELETE", "/pages/0", "").0, 403);
+        assert_eq!(http(port, t, &host, "DELETE", "/pages/1", "").0, 200);
+        assert_eq!(http(port, t, &host, "DELETE", "/pages/7", "").0, 404);
+        // files: no overwriting of unsaved work, no saving over a non-drui file
+        assert_eq!(http(port, t, &host, "POST", "/open", r#"{"path":"x.json"}"#).0, 409);
+        assert_eq!(http(port, t, &host, "POST", "/import", r#"{"path":"x.png","discard":true}"#).0, 400);
+        assert_eq!(http(port, t, &host, "POST", "/save", r#"{"path":"x.exe"}"#).0, 400);
+        assert_eq!(http(port, t, &host, "POST", "/undo", "").0, 200);
+        ids
+    });
+    while !client.is_finished() {
+        a.poll_api(&ctx);
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    let ids = client.join().unwrap();
+    let (x0, x1) = (a.world_rect(a.index_of(ids[0]).unwrap()).max.x, a.world_rect(a.index_of(ids[1]).unwrap()).max.x);
+    assert!(a.shapes.iter().any(|s| s.kind == Kind::Group), "grouped");
+    assert!((x0 - x1).abs() < 0.01, "aligned right: {x0} {x1}");
+    assert_eq!(a.pages.len(), 2, "the undo brought the deleted page back");
+}
+
+#[test]
+fn rest_api_styles_versions_branches_and_libraries() {
+    let ctx = egui::Context::default();
+    let mut a = App::default();
+    a.ctx = Some(ctx.clone());
+    a.toggle_api(&ctx, 0);
+    let (port, token) = (a.api.as_ref().unwrap().port, a.api.as_ref().unwrap().token.clone());
+    let host = format!("127.0.0.1:{port}");
+    let client = std::thread::spawn(move || {
+        let t = Some(token.as_str());
+        let json = |b: &[u8]| serde_json::from_slice::<serde_json::Value>(b).unwrap();
+        // styles can be added, listed, and nothing else
+        let (c, b) = http(port, t, &host, "POST", "/styles/color", r##"{"name":"Brand","color":[10,132,255,255]}"##);
+        assert_eq!(c, 200, "{}", String::from_utf8_lossy(&b));
+        assert_eq!(http(port, t, &host, "POST", "/styles/color", r#"{"name":""}"#).0, 400);
+        assert_eq!(http(port, t, &host, "POST", "/styles/nope", r#"{"name":"x"}"#).0, 400);
+        let (_, b) = http(port, t, &host, "GET", "/styles", "");
+        assert_eq!(json(&b)["color"][0]["name"], "Brand");
+        // versions: save, list, restore only when confirmed
+        http(port, t, &host, "POST", "/layers", r#"{"kind":"Rect","name":"A"}"#);
+        assert_eq!(http(port, t, &host, "POST", "/versions", r#"{"name":"v1"}"#).0, 200);
+        http(port, t, &host, "POST", "/layers", r#"{"kind":"Rect","name":"B"}"#);
+        assert_eq!(http(port, t, &host, "POST", "/versions/0/restore", "{}").0, 403);
+        assert_eq!(http(port, t, &host, "POST", "/versions/0/restore", r#"{"confirm":true}"#).0, 200);
+        assert_eq!(http(port, t, &host, "POST", "/versions/5/restore", r#"{"confirm":true}"#).0, 404);
+        let (_, b) = http(port, t, &host, "GET", "/versions", "");
+        assert_eq!(json(&b)[0]["name"], "v1");
+        // branches: make one, it cannot merge without an approved review, and an unchanged one can go
+        assert_eq!(http(port, t, &host, "POST", "/branches", r#"{"name":"try"}"#).0, 200);
+        assert_eq!(http(port, t, &host, "POST", "/branches/1/merge", "").0, 403);
+        assert_eq!(http(port, t, &host, "POST", "/branches/1/review", r#"{"reviewer":"sam"}"#).0, 200);
+        assert_eq!(http(port, t, &host, "POST", "/branches/1/merge", "").0, 403, "asked is not approved");
+        assert_eq!(http(port, t, &host, "DELETE", "/branches/1", "").0, 403, "it is open");
+        assert_eq!(http(port, t, &host, "PUT", "/branches/0", "").0, 200);
+        assert_eq!(http(port, t, &host, "DELETE", "/branches/1", "").0, 200);
+        assert_eq!(http(port, t, &host, "DELETE", "/branches/0", "").0, 403);
+        // a picture, a component and its instance, a copy, a duplicated page
+        let png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+        let (c, b) = http(port, t, &host, "POST", "/images", &format!(r#"{{"data":"{png}","name":"dot.png","x":5,"y":5}}"#));
+        assert_eq!(c, 200, "{}", String::from_utf8_lossy(&b));
+        assert!(json(&b)["layer"].is_u64());
+        assert_eq!(http(port, t, &host, "POST", "/images", r#"{"data":"AAAA"}"#).0, 400, "not a picture");
+        let (_, b) = http(port, t, &host, "POST", "/layers", r#"{"kind":"Frame","name":"Btn","component":true,"w":50,"h":20}"#);
+        let main = json(&b)["id"].as_u64().unwrap();
+        let (c, b) = http(port, t, &host, "POST", "/instances", &format!(r#"{{"main":{main},"x":100,"y":0}}"#));
+        assert_eq!(c, 200, "{}", String::from_utf8_lossy(&b));
+        assert_eq!(http(port, t, &host, "POST", "/instances", r#"{"main":99999}"#).0, 400);
+        let (_, b) = http(port, t, &host, "POST", "/copy", &format!(r#"{{"ids":[{main}]}}"#));
+        assert_eq!(json(&b)["layers"], 1);
+        let (_, b) = http(port, t, &host, "POST", "/paste", "");
+        assert_eq!(json(&b)["ids"].as_array().unwrap().len(), 1);
+        assert_eq!(http(port, t, &host, "POST", "/pages/0/duplicate", "").0, 200);
+        assert_eq!(http(port, t, &host, "POST", "/pages/9/duplicate", "").0, 404);
+        // libraries
+        assert_eq!(http(port, t, &host, "GET", "/libraries", "").0, 200);
+        assert_eq!(http(port, t, &host, "POST", "/libraries", r#"{"path":"x.exe"}"#).0, 400);
+        assert_eq!(http(port, t, &host, "POST", "/libraries/9/update", "").0, 404);
+    });
+    while !client.is_finished() {
+        a.poll_api(&ctx);
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    client.join().unwrap();
+    assert_eq!(a.shapes.iter().filter(|s| s.name == "A").count(), 1);
+    assert!(!a.shapes.iter().any(|s| s.name == "B"), "restored to v1");
+}
+
+#[test]
+fn rest_api_view_motion_tools_and_style_edits() {
+    let ctx = egui::Context::default();
+    let mut a = App::default();
+    a.ctx = Some(ctx.clone());
+    let own = a.new_id();
+    let mut r = Shape::new(Kind::Rect, own, 1, egui::pos2(0.0, 0.0), None);
+    r.size = egui::vec2(50.0, 50.0);
+    a.shapes.push(r);
+    a.toggle_api(&ctx, 0);
+    let (port, token) = (a.api.as_ref().unwrap().port, a.api.as_ref().unwrap().token.clone());
+    let host = format!("127.0.0.1:{port}");
+    let client = std::thread::spawn(move || {
+        let t = Some(token.as_str());
+        let json = |b: &[u8]| serde_json::from_slice::<serde_json::Value>(b).unwrap();
+        let rect = |x: i32| {
+            let (_, b) = http(port, t, &host, "POST", "/layers", &format!(r#"{{"kind":"Rect","x":{x},"y":0,"w":100,"h":100}}"#));
+            json(&b)["id"].as_u64().unwrap()
+        };
+        // view and preferences
+        assert_eq!(http(port, t, &host, "PUT", "/view", r#"{"rulers":false,"left_tab":"history","zoom":2,"guides":[{"vertical":true,"pos":100}],"nudge_big":20}"#).0, 200);
+        let (_, b) = http(port, t, &host, "GET", "/view", "");
+        let v = json(&b);
+        assert_eq!((v["rulers"].clone(), v["left_tab"].clone(), v["nudge_big"].clone(), v["guides"][0]["pos"].clone()), (false.into(), "history".into(), 20.0.into(), 100.0.into()));
+        assert_eq!(http(port, t, &host, "PUT", "/view", r#"{"nonsense":1}"#).0, 400);
+        assert_eq!(http(port, t, &host, "PUT", "/view", r#"{"left_tab":"sideways"}"#).0, 400);
+        // the Motion timeline
+        let (c, b) = http(port, t, &host, "PUT", "/motion", r#"{"length":3000,"loop":true,"time":9000}"#);
+        assert_eq!(c, 200);
+        assert_eq!((json(&b)["length"].as_f64(), json(&b)["time"].as_f64(), json(&b)["loop"].as_bool()), (Some(3000.0), Some(3000.0), Some(true)));
+        // styles: editing and deleting need the person's say-so
+        let (_, b) = http(port, t, &host, "POST", "/styles/color", r##"{"name":"Brand","color":[10,132,255,255]}"##);
+        let sid = json(&b)["id"].as_u64().unwrap();
+        assert_eq!(http(port, t, &host, "PATCH", &format!("/styles/color/{sid}"), r#"{"name":"Renamed"}"#).0, 403);
+        assert_eq!(http(port, t, &host, "PATCH", &format!("/styles/color/{sid}"), r#"{"name":"Renamed","confirm":true}"#).0, 200);
+        let (_, b) = http(port, t, &host, "GET", "/styles", "");
+        assert_eq!(json(&b)["color"][0]["name"], "Renamed");
+        assert_eq!(http(port, t, &host, "DELETE", &format!("/styles/color/{sid}"), r#"{"confirm":true}"#).0, 200);
+        assert_eq!(http(port, t, &host, "DELETE", &format!("/styles/color/{sid}"), r#"{"confirm":true}"#).0, 404);
+        // branch review: handed on or withdrawn, never answered
+        http(port, t, &host, "POST", "/branches", r#"{"name":"try"}"#);
+        assert_eq!(http(port, t, &host, "PUT", "/branches/1/review", r#"{"state":"approved"}"#).0, 403);
+        assert_eq!(http(port, t, &host, "PUT", "/branches/1/review", r#"{"state":"requested","reviewer":"sam"}"#).0, 200);
+        assert_eq!(http(port, t, &host, "PUT", "/branches/1/review", r#"{"state":"withdrawn"}"#).0, 200);
+        // the pointer tools by coordinates
+        let (r1, r2) = (rect(200), rect(250));
+        let both = format!("[{r1},{r2}]");
+        assert_eq!(http(port, t, &host, "POST", "/tools/cut", &format!(r#"{{"ids":[{r1}],"from":[250,-10],"to":[250,110]}}"#)).0, 200);
+        assert_eq!(http(port, t, &host, "POST", "/tools/cut", r#"{"from":[0,0],"to":[1,1]}"#).0, 400, "names its layers");
+        assert_eq!(http(port, t, &host, "POST", "/tools/cut", &format!(r#"{{"ids":[{own}],"from":[25,-10],"to":[25,60]}}"#)).0, 403);
+        let (e1, e2) = (rect(500), rect(550));
+        assert_eq!(http(port, t, &host, "POST", "/tools/builder", &format!(r#"{{"ids":[{e1},{e2}],"merge":[[525,50]],"delete":[[510,50]]}}"#)).0, 200);
+        let w = rect(800);
+        assert_eq!(http(port, t, &host, "POST", "/tools/erase", &format!(r#"{{"ids":[{w}],"points":[[850,-20],[850,120]]}}"#)).0, 200);
+        assert_eq!(http(port, t, &host, "POST", "/tools/lasso", &format!(r#"{{"ids":[{w}]}}"#)).0, 400);
+        let _ = both;
+        // Present
+        let (_, b) = http(port, t, &host, "POST", "/layers", r#"{"kind":"Frame","name":"Home","w":300,"h":200}"#);
+        let f = json(&b)["id"].as_u64().unwrap();
+        assert_eq!(http(port, t, &host, "POST", "/present", &format!(r#"{{"id":{f}}}"#)).0, 200);
+        assert_eq!(http(port, t, &host, "POST", "/present", r#"{"id":99999}"#).0, 404);
+        assert_eq!(http(port, t, &host, "DELETE", "/present", "").0, 200);
+    });
+    while !client.is_finished() {
+        a.poll_api(&ctx);
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    client.join().unwrap();
+    assert!(!a.rulers && a.present.is_none());
+    let paths = a.shapes.iter().filter(|s| s.kind == Kind::Path).count();
+    assert!(paths >= 4, "the cut made two paths and the builder at least two: {paths}");
+    assert!(a.shapes.iter().any(|s| s.id == own && s.size.x == 50.0), "the person's layer is untouched");
+}
 
 
 
@@ -4081,6 +4417,42 @@ fn page_hex_field_keeps_its_height_while_editing() {
 
 
 
+#[test]
+fn notes_follow_their_layer_and_never_overlap() {
+    let mut a = App::default();
+    let f = frame(&mut a, 100.0, 100.0, 200.0, 100.0);
+    let fi = a.index_of(f).unwrap();
+    let long = "A long note that wraps over several lines and so ends up taller than the guess the API made when it placed the note. ".repeat(3);
+    let n1 = a.add_note(&serde_json::json!({ "text": long, "near": f })).unwrap()["id"].as_u64().unwrap();
+    let n2 = a.add_note(&serde_json::json!({ "text": "Second", "near": f })).unwrap()["id"].as_u64().unwrap();
+    let ctx = egui::Context::default();
+    let settle = |a: &mut App| {
+        for _ in 0..3 {
+            let _ = ctx.run_ui(egui::RawInput::default(), |ui| a.fit_texts(ui.painter()));
+            a.settle();
+        }
+    };
+    let rect = |a: &App, id: u64| { let s = &a.shapes[a.index_of(id).unwrap()]; egui::Rect::from_min_size(s.pos, s.size) };
+    settle(&mut a);
+    // laid out: the first note has grown to its text and the second is still clear of it
+    assert!(rect(&a, n1).height() > 60.0, "the long note grew: {:?}", rect(&a, n1));
+    assert!(!rect(&a, n1).intersects(rect(&a, n2)), "{:?} {:?}", rect(&a, n1), rect(&a, n2));
+    assert_eq!(rect(&a, n1).min.x, 100.0 + 200.0 + 32.0);
+    // settling again changes nothing
+    let before = (rect(&a, n1), rect(&a, n2));
+    settle(&mut a);
+    assert_eq!((rect(&a, n1), rect(&a, n2)), before);
+    // the layer moves, the notes go with it
+    a.shapes[fi].pos = egui::pos2(500.0, 300.0);
+    settle(&mut a);
+    assert_eq!(rect(&a, n1).min, egui::pos2(500.0 + 200.0 + 32.0, 300.0));
+    assert!(!rect(&a, n1).intersects(rect(&a, n2)));
+    // the layer is deleted: the notes stay where they are
+    let at = rect(&a, n1).min;
+    a.shapes.remove(fi);
+    settle(&mut a);
+    assert_eq!(rect(&a, n1).min, at);
+}
 
 
 // writes a document with a vector path, a frame, a text layer, a main component and an instance to $DRUI_PATHDOC for checking

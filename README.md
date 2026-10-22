@@ -88,7 +88,7 @@ Legend: ✅ done and covered by a test, 🟡 works with limits, ⬜ not built ye
 Some parts of drui are not published here. I plan to sell them, so they stay private:
 
 - **Collaboration.** Live co-editing: several people in one file, with cursors, cursor chat and shared edits.
-- **Claude CLI integration.** A local API that lets Claude Code read, debug and edit your design while you watch. It works on copies, never on your originals, and leaves notes saying why it changed things. Plugins and scripting go with it.
+- **Plugins.** Scripts in a plugins folder that read and edit the open file.
 - **Export to frontend.** Turn designs into code: React and Next.js apps, HTML and CSS, Tailwind, Kotlin (Jetpack Compose), Swift (SwiftUI), Flutter, and design tokens from your variables. This also includes the Code tab in Dev Mode. (The CSS properties and measurements in Dev Mode, and the one-file HTML export of a prototype, stay free.)
 - **Accounts.** The sign-in that switches those features on.
 
