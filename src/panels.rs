@@ -1,4 +1,5 @@
 // The side panels and the toolbar.
+use std::collections::HashMap;
 use crate::fig::Tip as _;
 use egui::{Align2, Color32, FontId, Pos2, Rect, RichText, Sense, Stroke, StrokeKind, Vec2};
 
@@ -8,7 +9,7 @@ use crate::model::*;
 use crate::ops::AlignOp;
 use crate::glyphs::{Glyph, divider, menu_item, paint_glyph, paint_glyph_sized, row_icon};
 use crate::widgets::{Icon, paint_eye, paint_lock, tool_button};
-use crate::{App, BG, BG_PRESSED, BG_SECONDARY, BRAND, LeftTab, Mode, R_LARGE, R_MEDIUM, R_SMALL, Tab, TEXT, TEXT_SECONDARY, TEXT_TERTIARY, Tool};
+use crate::{App, BG, BG_PRESSED, BG_SECONDARY, BRAND, LeftTab, Mode, R_LARGE, R_SMALL, Tab, TEXT, TEXT_SECONDARY, TEXT_TERTIARY, Tool};
 
 enum RowAct {
     Select(u64),
@@ -217,23 +218,46 @@ fn ease_box(ui: &mut egui::Ui, r: Rect, ease: Easing) {
     resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, format!("Easing curve: {name}")));
 }
 
-// a 32px rail button with an optional 9px label under it
-fn rail_button(ui: &mut egui::Ui, b: Rect, g: Glyph, label: Option<&str>, selected: bool, name: &str) -> egui::Response {
-    let resp = ui.interact(b, ui.id().with(("rail", name)), Sense::click());
-    let bg = if selected {
+// the toolbar pill is R_LARGE with 6px of padding: buttons inside it are concentric with it
+const R_TOOL: u8 = R_LARGE - 6;
+const MENU_H: f32 = 40.0; // the menu header above the canvas
+
+// the name editor of a row: focused once when it opens; true when it is done (Enter, or the focus left)
+fn inline_rename(ui: &mut egui::Ui, edit: Rect, text: &mut String, eid: egui::Id) -> bool {
+    let r = fig::put(ui, edit, egui::TextEdit::singleline(text).id(eid).font(fig::reg(11.0)).vertical_align(egui::Align::Center));
+    // focus once when the editor opens: forcing it every frame kept a click elsewhere from leaving the field
+    let flag = eid.with("opened");
+    let started = ui.data(|d| d.get_temp::<bool>(flag)) != Some(true);
+    if started {
+        ui.data_mut(|d| d.insert_temp(flag, true));
+        r.request_focus();
+    }
+    let done = (!started && !r.has_focus()) || r.lost_focus() || ui.input(|i| i.key_pressed(egui::Key::Enter));
+    if done {
+        ui.data_mut(|d| d.remove::<bool>(flag));
+    }
+    done
+}
+
+// a button of the menu header at `x`: 24px, a 16px icon then the 11px label, 8px of padding either side, `on` is the toggled look;
+// returns it and its width
+fn header_button(ui: &mut egui::Ui, x: f32, y: f32, g: Glyph, label: &str, on: bool) -> (egui::Response, f32) {
+    let w = ui.painter().layout_no_wrap(label.into(), fig::reg(11.0), TEXT()).size().x + 8.0 + 16.0 + 6.0 + 10.0;
+    let r = Rect::from_min_size(Pos2::new(x, y), Vec2::new(w, fig::ROW));
+    let resp = ui.interact(r, ui.id().with(("header-button", label)), Sense::click());
+    let bg = if on {
         fig::SELECTED()
     } else if resp.hovered() {
         fig::INPUT()
     } else {
         Color32::TRANSPARENT
     };
-    ui.painter().rect_filled(b, fig::RADIUS, bg);
-    paint_glyph_sized(ui.painter(), b.center(), g, if selected { fig::SELECTED_INK() } else { TEXT() }, 16.0);
-    if let Some(l) = label {
-        fig::ptext(ui.painter(), Pos2::new(b.center().x, b.bottom() + 8.7), Align2::CENTER_CENTER, l, fig::reg(9.0), TEXT());
-    }
-    resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Button, true, selected, name));
-    resp
+    ui.painter().rect_filled(r, fig::RADIUS, bg);
+    let ink = if on { fig::SELECTED_INK() } else { TEXT() };
+    paint_glyph(ui.painter(), Pos2::new(r.left() + 16.0, r.center().y), g, ink);
+    fig::ptext(ui.painter(), Pos2::new(r.left() + 30.0, r.center().y), Align2::LEFT_CENTER, label, fig::reg(11.0), ink);
+    resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Button, true, on, label));
+    (resp, w)
 }
 
 // a left-panel section title, like Pages and Layers: 44px, 11px semibold at 16, 24px icon buttons from
@@ -257,7 +281,7 @@ fn search_field(ui: &mut egui::Ui, text: &mut String, name: &str, hint: &str) ->
     let f = Rect::from_min_max(Pos2::new(row.left() + 16.0, row.top()), Pos2::new(row.right() - 8.0, row.bottom()));
     fig::input_bg(ui, f, false);
     paint_glyph_sized(ui.painter(), Pos2::new(f.left() + 12.0, f.center().y), Glyph::Search, TEXT_SECONDARY(), 13.0);
-    fig::text_edit(ui, f.with_min_x(f.left() + 18.0), text, name, hint)
+    fig::text_edit_in(ui, f.with_min_x(f.left() + 18.0), Some(f), text, name, hint)
 }
 
 // a group title in an Assets list, as Figma's "All libraries" / "UI kits": 32px, 11px semibold at 16, an
@@ -365,29 +389,62 @@ impl App {
 
     // ---- left rail, main menu, file header
 
-    // the rail on the far left (Figma: 58px; 32px buttons 56px apart under the logo slot, which holds the menu)
-    pub fn rail(&mut self, ui: &mut egui::Ui) {
+    // the menu header: a full-width bar under the tab bar and above the canvas (Menu, File with the file menu, Assets and Variables,
+    // which open as windows over the canvas, and Help at the right end). Not measured against Figma.
+    pub fn menu_header_panel(&mut self, ui: &mut egui::Ui) {
+        egui::Panel::top("menu-header").resizable(false).exact_size(MENU_H).frame(egui::Frame::NONE.fill(BG())).show(ui, |ui| self.menu_header(ui));
+    }
+
+    pub fn menu_header(&mut self, ui: &mut egui::Ui) {
         let r = ui.max_rect();
-        let cx = r.left() + 29.0;
-        let menu = rail_button(ui, Rect::from_center_size(Pos2::new(cx, r.top() + 24.0), Vec2::splat(32.0)), Glyph::Menu, None, false, "Menu");
+        let y = r.center().y - fig::ROW / 2.0;
+        let menu = fig::icon_button(ui, Rect::from_min_size(Pos2::new(r.left() + 8.0, y), Vec2::splat(fig::ROW)), Glyph::Menu, "Main menu", false);
         egui::Popup::menu(&menu).style(crate::glyphs::fig_menu_style).show(|ui| self.main_menu(ui));
-        ui.painter().rect_filled(Rect::from_center_size(Pos2::new(cx, r.top() + 48.5), Vec2::new(24.0, 1.0)), 0.0, fig::RULE());
-        // Figma's rail: File and Assets. Version history is under File, comments under View.
-        for (k, (t, g, label)) in [(LeftTab::Layers, Glyph::File, "File"), (LeftTab::Assets, Glyph::Library, "Assets")].into_iter().enumerate() {
-            let b = Rect::from_min_size(Pos2::new(r.left() + 13.0, r.top() + 60.0 + 56.0 * k as f32), Vec2::splat(32.0));
-            if rail_button(ui, b, g, Some(label), self.left_tab == t, label).clicked() {
-                self.left_tab = t;
-            }
+        ui.painter().rect_filled(Rect::from_center_size(Pos2::new(r.left() + 40.5, r.center().y), Vec2::new(1.0, 16.0)), 0.0, fig::RULE());
+        let mut x = r.left() + 48.0;
+        let (file, w) = header_button(ui, x, y, Glyph::File, "File", false);
+        let ctx = ui.ctx().clone();
+        egui::Popup::menu(&file).style(crate::glyphs::fig_menu_style).show(|ui| self.file_items(ui, &ctx));
+        x += w + 4.0;
+        let (assets, w) = header_button(ui, x, y, Glyph::Library, "Assets", self.assets_open);
+        if assets.clicked() {
+            self.assets_open ^= true;
+            self.vars_open &= !self.assets_open;
         }
-        // Variables: a window over the canvas, not a left-panel tab
-        let vb = Rect::from_min_size(Pos2::new(r.left() + 13.0, r.top() + 60.0 + 56.0 * 2.0), Vec2::splat(32.0));
-        if rail_button(ui, vb, Glyph::Sliders, Some("Variables"), self.vars_open, "Variables").clicked() {
+        x += w + 4.0;
+        let (vars, _) = header_button(ui, x, y, Glyph::Sliders, "Variables", self.vars_open);
+        if vars.clicked() {
             self.vars_open ^= true;
+            self.assets_open &= !self.vars_open;
         }
-        let help = Rect::from_center_size(Pos2::new(cx, r.bottom() - 32.0), Vec2::splat(32.0));
-        if rail_button(ui, help, Glyph::Help, None, self.show_help, "Help").clicked() {
+        if fig::icon_button(ui, Rect::from_min_size(Pos2::new(r.right() - 8.0 - fig::ROW, y), Vec2::splat(fig::ROW)), Glyph::Help, "Help", self.show_help).clicked() {
             self.show_help ^= true;
         }
+        ui.painter().rect_filled(Rect::from_min_size(Pos2::new(r.left(), r.bottom() - 1.0), Vec2::new(r.width(), 1.0)), 0.0, fig::RULE());
+    }
+
+    // the Assets window: the assets list in a card over the canvas, like the Variables window (Esc or the X closes it)
+    pub fn assets_window(&mut self, ctx: &egui::Context) {
+        if !self.assets_open {
+            return;
+        }
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) && !ctx.text_edit_focused() {
+            self.assets_open = false;
+            return;
+        }
+        let screen = ctx.content_rect();
+        let size = Vec2::new(340.0, (screen.height() - 140.0).clamp(300.0, 640.0));
+        let origin = Pos2::new(screen.center().x - size.x / 2.0, screen.bottom() - size.y - 72.0).max(screen.min + Vec2::splat(8.0));
+        egui::Area::new(egui::Id::new("assets-window")).order(egui::Order::Foreground).fixed_pos(origin).show(ctx, |ui| {
+            let (card, _) = ui.allocate_exact_size(size, Sense::hover());
+            ui.painter().add(egui::Shadow { offset: [0, 8], blur: 24, spread: 0, color: Color32::from_black_alpha(110) }.as_shape(card, R_LARGE as f32));
+            ui.painter().rect(card, R_LARGE as f32, BG(), Stroke::new(1.0, fig::RULE()), StrokeKind::Inside);
+            let inner = card.shrink(1.0);
+            let mut content = ui.new_child(egui::UiBuilder::new().max_rect(inner));
+            content.set_clip_rect(inner);
+            content.spacing_mut().item_spacing = Vec2::ZERO;
+            self.assets_tab(&mut content);
+        });
     }
 
     // Figma's zoom menu (measured, Figma 126.9.13): an editable zoom value, then zoom steps, then what the canvas shows
@@ -399,7 +456,7 @@ impl App {
             self.zoom_text = format!("{:.0}%", self.zoom * 100.0);
         }
         ui.painter().rect_stroke(field, fig::RADIUS, Stroke::new(2.0, fig::SHARE), StrokeKind::Inside);
-        let resp = fig::text_edit(ui, field, &mut self.zoom_text, "Zoom", "");
+        let resp = fig::text_edit_in(ui, field, None, &mut self.zoom_text, "Zoom", "");
         if self.zoom_fresh {
             resp.request_focus();
             let mut st = egui::TextEdit::load_state(ui.ctx(), resp.id).unwrap_or_default();
@@ -451,9 +508,6 @@ impl App {
         if crate::glyphs::menu_check(ui, self.layout_guides, "Layout guides", "Shift+G") {
             self.layout_guides ^= true;
         }
-        if crate::glyphs::menu_check(ui, self.rulers, "Rulers", "Shift+R") {
-            self.rulers ^= true;
-        }
         crate::glyphs::menu_submenu(ui, None, "Outlines", |ui| {
             if crate::glyphs::menu_check(ui, self.outlines, "Show outlines", "Ctrl+Shift+O") {
                 self.outlines ^= true;
@@ -476,11 +530,7 @@ impl App {
     }
 
     fn view_items(&mut self, ui: &mut egui::Ui) {
-        let (rulers, snap) = (self.rulers, self.snap);
-        if menu_item(ui, Some(if rulers { Glyph::Eye } else { Glyph::EyeOff }), "Rulers and guides", "Shift+R", true) {
-            self.rulers ^= true;
-            ui.close();
-        }
+        let snap = self.snap;
         if menu_item(ui, Some(if snap { Glyph::Eye } else { Glyph::EyeOff }), "Snap to objects", "", true) {
             self.snap ^= true;
             ui.close();
@@ -737,7 +787,6 @@ impl App {
                 (self.snap, "Snap to objects", "", 0),
                 (self.snap_pixels, "Snap to pixel grid", "Ctrl+Shift+'", 1),
                 (self.pixel_grid, "Show pixel grid", "Shift+'", 2),
-                (self.rulers, "Show rulers", "Shift+R", 3),
                 (self.layout_guides, "Show layout guides", "Shift+G", 4),
                 (self.prop_labels, "Show property labels", "", 5),
                 (self.spell, "Check spelling", "", 7),
@@ -749,7 +798,6 @@ impl App {
                         0 => self.snap ^= true,
                         1 => self.snap_pixels ^= true,
                         2 => self.pixel_grid ^= true,
-                        3 => self.rulers ^= true,
                         4 => self.layout_guides ^= true,
                         5 => self.prop_labels ^= true,
                         7 => self.spell ^= true,
@@ -808,115 +856,203 @@ impl App {
 
     pub fn left_panel(&mut self, ui: &mut egui::Ui) {
         ui.spacing_mut().item_spacing = Vec2::ZERO;
-        if self.left_tab != LeftTab::Assets {
-            self.file_header(ui);
-        }
+        self.file_header(ui);
         match self.left_tab {
             LeftTab::Layers if self.search_open => self.search_view(ui),
-            LeftTab::Layers => self.layers(ui),
-            LeftTab::Assets => self.assets_tab(ui),
+            LeftTab::Layers if self.in_canvas => self.layers(ui),
+            LeftTab::Layers => {
+                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| self.pages_section(ui));
+            }
             LeftTab::History => self.history_tab(ui),
             LeftTab::Comments => self.comments_tab(ui),
         }
     }
 
-    // Pages: a 44px header with Find and Add, 24px rows 8px apart inset 8px, then a divider. A page row opens a menu on a right
-    // click (rename, duplicate, delete) and can be dragged to a new place in the list.
+    // Canvas: a 44px header with Find, New folder and Add, then the folders and the canvases (24px rows 8px apart inset 8px: a
+    // chevron column, a 13px icon, the name; a canvas in a folder is indented 16px), then a divider. A click on a folder folds it;
+    // a canvas row can be dragged to a new place, into a folder (drop it on the folder) or out of one (drop it under the list);
+    // a right click opens a menu, a double click renames. Folders list first, in the order they were made.
     fn pages_section(&mut self, ui: &mut egui::Ui) {
+        enum Row {
+            Folder(usize),
+            Page(usize),
+        }
         let r = fig::row(ui, 44.0);
-        fig::text(ui, Pos2::new(r.left() + 16.0, r.top() + 22.0 + fig::TEXT_LIFT * 11.0), Align2::LEFT_CENTER, "Pages", fig::semi(11.0), TEXT());
+        fig::text(ui, Pos2::new(r.left() + 16.0, r.top() + 22.0 + fig::TEXT_LIFT * 11.0), Align2::LEFT_CENTER, "Canvas", fig::semi(11.0), TEXT());
         let plus = Rect::from_min_size(Pos2::new(r.right() - 32.0, r.top() + 10.0), Vec2::splat(24.0));
-        if fig::icon_button(ui, plus.translate(Vec2::new(-28.0, 0.0)), Glyph::Search, "Search", false).clicked() {
+        if fig::icon_button(ui, plus.translate(Vec2::new(-56.0, 0.0)), Glyph::Search, "Search", false).clicked() {
             self.search_open = true;
             self.search_query.clear();
             self.search_focused = false;
         }
-        let add_page = fig::icon_button(ui, plus, Glyph::Plus, "Add page", false).clicked();
-        let (mut switch, mut delete, mut duplicate) = (None, None, None);
+        let add_folder = fig::icon_button(ui, plus.translate(Vec2::new(-28.0, 0.0)), Glyph::FolderPlus, "New folder", false).clicked();
+        let add_page = fig::icon_button(ui, plus, Glyph::Plus, "Add canvas", false).clicked();
+        let (mut switch, mut delete, mut duplicate, mut move_out) = (None, None, None, None);
+        let (mut toggle, mut delete_folder) = (None, None);
         let n = self.pages.len();
+        // the folder a canvas is in (a folder that is gone counts as none)
+        let owner: Vec<Option<usize>> = (0..n).map(|i| self.folders.iter().position(|f| f.id == self.pages[i].folder)).collect();
+        let mut rows: Vec<(Row, usize)> = vec![];
+        for fi in 0..self.folders.len() {
+            rows.push((Row::Folder(fi), 0));
+            if !self.folders[fi].collapsed {
+                rows.extend((0..n).filter(|&i| owner[i] == Some(fi)).map(|i| (Row::Page(i), 1)));
+            }
+        }
+        rows.extend((0..n).filter(|&i| owner[i].is_none()).map(|i| (Row::Page(i), 0)));
         let mut rects: Vec<Rect> = vec![];
-        for i in 0..n {
+        for (k, (what, depth)) in rows.iter().enumerate() {
             let row = fig::row(ui, 24.0);
             let rect = Rect::from_min_max(Pos2::new(row.left() + 8.0, row.top()), Pos2::new(row.right() - 8.0, row.bottom()));
             rects.push(rect);
-            let resp = ui.interact(rect, ui.id().with(("page", i)), Sense::click_and_drag());
-            let cur = i == self.cur;
-            resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Button, true, cur, format!("Page {}", self.pages[i].name)));
-            if cur {
-                ui.painter().rect_filled(rect, fig::RADIUS, fig::INPUT());
-            } else if resp.hovered() {
-                ui.painter().rect_filled(rect, fig::RADIUS, crate::theme::WELL());
-            }
+            let x0 = rect.left() + 16.0 * *depth as f32;
             let del = Rect::from_center_size(rect.right_center() - Vec2::new(14.0, 0.0), Vec2::splat(18.0));
-            if self.renaming_page == Some(i) {
-                let edit = Rect::from_min_max(rect.min + Vec2::new(4.0, 2.0), Pos2::new(del.left() - 2.0, rect.max.y - 2.0));
-                let eid = egui::Id::new(("page-rename", i));
-                let r = fig::put(ui, edit, egui::TextEdit::singleline(&mut self.pages[i].name).id(eid).font(fig::reg(11.0)).vertical_align(egui::Align::Center));
-                // focus once when the editor opens: forcing it every frame kept a click elsewhere from leaving the field
-                let flag = eid.with("opened");
-                let started = ui.data(|d| d.get_temp::<bool>(flag)) != Some(true);
-                if started {
-                    ui.data_mut(|d| d.insert_temp(flag, true));
-                    r.request_focus();
+            let edit = Rect::from_min_max(Pos2::new(x0 + 38.0, rect.top() + 2.0), Pos2::new(del.left() - 2.0, rect.bottom() - 2.0));
+            match *what {
+                Row::Page(i) => {
+                    let resp = ui.interact(rect, ui.id().with(("page", i)), Sense::click_and_drag());
+                    let cur = i == self.cur;
+                    resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Button, true, cur, format!("Canvas {}", self.pages[i].name)));
+                    if cur {
+                        ui.painter().rect_filled(rect, fig::RADIUS, fig::INPUT());
+                    } else if resp.hovered() {
+                        ui.painter().rect_filled(rect, fig::RADIUS, crate::theme::WELL());
+                    }
+                    let ink = if self.page_drag == Some(i) { TEXT_SECONDARY() } else { TEXT() };
+                    paint_glyph_sized(ui.painter(), Pos2::new(x0 + 28.0, rect.center().y), Glyph::File, if cur { TEXT() } else { TEXT_SECONDARY() }, 13.0);
+                    if self.renaming_page == Some(i) {
+                        if inline_rename(ui, edit, &mut self.pages[i].name, egui::Id::new(("page-rename", i))) {
+                            self.end_rename_page(i);
+                        }
+                    } else {
+                        let font = if cur { fig::semi(11.0) } else { fig::reg(11.0) };
+                        fig::text(ui, Pos2::new(x0 + 42.0, rect.center().y), Align2::LEFT_CENTER, &self.pages[i].name, font, ink);
+                    }
+                    if n > 1 && resp.hovered() && self.page_drag.is_none() {
+                        paint_glyph(ui.painter(), del.center(), Glyph::Delete, TEXT_SECONDARY());
+                    }
+                    if resp.drag_started() {
+                        self.page_drag = Some(i);
+                    }
+                    if resp.double_clicked() {
+                        self.start_rename_page(i);
+                    } else if resp.clicked() {
+                        if n > 1 && resp.interact_pointer_pos().is_some_and(|p| del.contains(p)) {
+                            delete = Some(i);
+                        } else {
+                            switch = Some(i);
+                        }
+                    }
+                    let mut rename = false;
+                    let filed = owner[i].is_some();
+                    resp.context_menu(|ui| {
+                        if menu_item(ui, Some(Glyph::Pencil), "Rename", "Double-click", true) {
+                            rename = true;
+                            ui.close();
+                        }
+                        if menu_item(ui, Some(Glyph::Copy), "Duplicate canvas", "", true) {
+                            duplicate = Some(i);
+                            ui.close();
+                        }
+                        if menu_item(ui, Some(Glyph::Folder), "Move out of folder", "", filed) {
+                            move_out = Some(i);
+                            ui.close();
+                        }
+                        crate::glyphs::menu_sep(ui);
+                        if menu_item(ui, Some(Glyph::Delete), "Delete canvas", "", n > 1) {
+                            delete = Some(i);
+                            ui.close();
+                        }
+                    });
+                    if rename {
+                        self.start_rename_page(i);
+                    }
                 }
-                if (!started && !r.has_focus()) || r.lost_focus() || ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                    ui.data_mut(|d| d.remove::<bool>(flag));
-                    self.end_rename_page(i);
+                Row::Folder(fi) => {
+                    let (id, collapsed) = (self.folders[fi].id, self.folders[fi].collapsed);
+                    let resp = ui.interact(rect, ui.id().with(("folder", id)), Sense::click());
+                    resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::CollapsingHeader, true, !collapsed, format!("Folder {}", self.folders[fi].name)));
+                    if resp.hovered() {
+                        ui.painter().rect_filled(rect, fig::RADIUS, crate::theme::WELL());
+                    }
+                    paint_glyph_sized(ui.painter(), Pos2::new(x0 + 10.0, rect.center().y), if collapsed { Glyph::ChevronRight } else { Glyph::ChevronDown }, TEXT_SECONDARY(), 9.5);
+                    paint_glyph_sized(ui.painter(), Pos2::new(x0 + 28.0, rect.center().y), Glyph::Folder, TEXT_SECONDARY(), 13.0);
+                    if self.renaming_folder == Some(id) {
+                        if inline_rename(ui, edit, &mut self.folders[fi].name, egui::Id::new(("folder-rename", id))) {
+                            self.renaming_folder = None;
+                        }
+                    } else {
+                        fig::text(ui, Pos2::new(x0 + 42.0, rect.center().y), Align2::LEFT_CENTER, &self.folders[fi].name, fig::reg(11.0), TEXT());
+                    }
+                    if resp.hovered() && self.page_drag.is_none() {
+                        paint_glyph(ui.painter(), del.center(), Glyph::Delete, TEXT_SECONDARY());
+                    }
+                    if resp.double_clicked() {
+                        self.renaming_folder = Some(id);
+                        toggle = Some(fi); // the first click of the double click folded it: put it back
+                    } else if resp.clicked() {
+                        if resp.interact_pointer_pos().is_some_and(|p| del.contains(p)) {
+                            delete_folder = Some(id);
+                        } else {
+                            toggle = Some(fi);
+                        }
+                    }
+                    resp.context_menu(|ui| {
+                        if menu_item(ui, Some(Glyph::Pencil), "Rename", "Double-click", true) {
+                            self.renaming_folder = Some(id);
+                            ui.close();
+                        }
+                        crate::glyphs::menu_sep(ui);
+                        if menu_item(ui, Some(Glyph::Delete), "Delete folder", "", true) {
+                            delete_folder = Some(id);
+                            ui.close();
+                        }
+                    });
                 }
-            } else {
-                let font = if cur { fig::semi(11.0) } else { fig::reg(11.0) };
-                fig::text(ui, Pos2::new(row.left() + 16.0, rect.center().y), Align2::LEFT_CENTER, &self.pages[i].name, font, if self.page_drag == Some(i) { TEXT_SECONDARY() } else { TEXT() });
             }
-            if n > 1 && resp.hovered() && self.page_drag.is_none() {
-                paint_glyph(ui.painter(), del.center(), Glyph::Delete, TEXT_SECONDARY());
-            }
-            if resp.drag_started() {
-                self.page_drag = Some(i);
-            }
-            if resp.double_clicked() {
-                self.start_rename_page(i);
-            } else if resp.clicked() {
-                if n > 1 && resp.interact_pointer_pos().is_some_and(|p| del.contains(p)) {
-                    delete = Some(i);
-                } else {
-                    switch = Some(i);
-                }
-            }
-            let mut rename = false;
-            resp.context_menu(|ui| {
-                if menu_item(ui, Some(Glyph::Pencil), "Rename", "Double-click", true) {
-                    rename = true;
-                    ui.close();
-                }
-                if menu_item(ui, Some(Glyph::Copy), "Duplicate page", "", true) {
-                    duplicate = Some(i);
-                    ui.close();
-                }
-                crate::glyphs::menu_sep(ui);
-                if menu_item(ui, Some(Glyph::Delete), "Delete page", "", n > 1) {
-                    delete = Some(i);
-                    ui.close();
-                }
-            });
-            if rename {
-                self.start_rename_page(i);
-            }
-            if i + 1 < n {
+            if k + 1 < rows.len() {
                 fig::row(ui, 8.0);
             }
         }
-        // dragging a row: a line shows where it lands; letting go moves it
+        // dragging a canvas row: a line shows where it lands (or the folder row is outlined when it lands in it); letting go moves it
         let mut moved = None;
         if let Some(from) = self.page_drag {
+            let first_root = (0..n).find(|&i| owner[i].is_none()).unwrap_or(n);
+            // (the slot in `pages`, the folder id, the line to draw, the folder row to outline)
+            let at = |p: Pos2| -> (usize, u64, Option<[Pos2; 2]>, Option<Rect>) {
+                let over_folder = rows.iter().zip(&rects).find(|((w, _), rc)| matches!(w, Row::Folder(_)) && rc.contains(p));
+                if let Some(((Row::Folder(fi), _), rc)) = over_folder {
+                    return (n, self.folders[*fi].id, None, Some(*rc));
+                }
+                match rects.iter().position(|rc| p.y < rc.center().y) {
+                    Some(k) => {
+                        let (slot, folder, depth) = match rows[k].0 {
+                            Row::Page(j) => (j, owner[j].map_or(0, |f| self.folders[f].id), rows[k].1),
+                            Row::Folder(_) => (first_root, 0, 0),
+                        };
+                        let (rc, y) = (rects[k], rects[k].top() - 4.0);
+                        (slot, folder, Some([Pos2::new(rc.left() + 16.0 * depth as f32, y), Pos2::new(rc.right(), y)]), None)
+                    }
+                    None => {
+                        let rc = rects[rects.len() - 1];
+                        (n, 0, Some([Pos2::new(rects[0].left(), rc.bottom() + 4.0), Pos2::new(rc.right(), rc.bottom() + 4.0)]), None)
+                    }
+                }
+            };
             match ui.input(|i| i.pointer.latest_pos()) {
                 Some(p) if ui.input(|i| i.pointer.any_down()) => {
-                    let slot = rects.iter().position(|r| p.y < r.center().y).unwrap_or(n);
-                    let (y, r0) = if slot < n { (rects[slot].top() - 4.0, rects[slot]) } else { (rects[n - 1].bottom() + 4.0, rects[n - 1]) };
-                    ui.painter().line_segment([Pos2::new(r0.left(), y), Pos2::new(r0.right(), y)], Stroke::new(2.0, BRAND));
+                    let (_, _, line, outline) = at(p);
+                    if let Some(l) = line {
+                        ui.painter().line_segment(l, Stroke::new(2.0, BRAND));
+                    }
+                    if let Some(rc) = outline {
+                        ui.painter().rect_stroke(rc, fig::RADIUS, Stroke::new(2.0, BRAND), StrokeKind::Inside);
+                    }
                     ui.ctx().request_repaint();
                 }
                 Some(p) => {
-                    moved = Some((from, rects.iter().position(|r| p.y < r.center().y).unwrap_or(n)));
+                    let (slot, folder, ..) = at(p);
+                    moved = Some((from, slot, folder));
                     self.page_drag = None;
                 }
                 None => self.page_drag = None,
@@ -924,14 +1060,26 @@ impl App {
         }
         fig::row(ui, 12.0);
         fig::rule(ui);
-        if let Some((from, to)) = moved {
-            self.move_page(from, to);
+        if let Some((from, to, folder)) = moved {
+            self.move_page_into(from, to, folder);
         } else if let Some(i) = delete {
             self.delete_page(i);
         } else if let Some(i) = duplicate {
             self.duplicate_page(i);
+        } else if let Some(i) = move_out {
+            self.move_page_into(i, n, 0);
         } else if let Some(i) = switch {
             self.switch_page(i);
+            self.in_canvas = true;
+        }
+        if let Some(fi) = toggle {
+            self.folders[fi].collapsed ^= true;
+        }
+        if let Some(id) = delete_folder {
+            self.delete_folder(id);
+        }
+        if add_folder {
+            self.add_folder();
         }
         if add_page {
             self.add_page();
@@ -948,7 +1096,7 @@ impl App {
         let field = Rect::from_min_max(Pos2::new(r.left() + 16.0, r.top() + 10.0), Pos2::new(r.right() - 44.0, r.top() + 34.0));
         fig::input_bg(ui, field, false);
         paint_glyph_sized(ui.painter(), Pos2::new(field.left() + 12.0, field.center().y), Glyph::Search, TEXT_SECONDARY(), 13.0);
-        let edit = fig::text_edit(ui, field.with_min_x(field.left() + 18.0), &mut self.search_query, "Search", "Search layers and pages");
+        let edit = fig::text_edit_in(ui, field.with_min_x(field.left() + 18.0), Some(field), &mut self.search_query, "Search", "Search layers and canvases");
         if !self.search_focused {
             edit.request_focus();
             self.search_focused = true;
@@ -962,7 +1110,7 @@ impl App {
             ui.add_space(14.0);
             ui.vertical_centered(|ui| {
                 row_icon(ui, Glyph::Search, TEXT_TERTIARY());
-                ui.label(RichText::new("Search layers and pages").color(TEXT_SECONDARY()));
+                ui.label(RichText::new("Search layers and canvases").color(TEXT_SECONDARY()));
             });
             return;
         }
@@ -976,9 +1124,9 @@ impl App {
             }
             if !pages.is_empty() {
                 let h = fig::row(ui, 32.0);
-                fig::ptext(ui.painter(), Pos2::new(h.left() + 16.0, h.center().y), Align2::LEFT_CENTER, "Pages", fig::semi(11.0), TEXT());
+                fig::ptext(ui.painter(), Pos2::new(h.left() + 16.0, h.center().y), Align2::LEFT_CENTER, "Canvas", fig::semi(11.0), TEXT());
                 for &i in &pages {
-                    let (r, resp, _) = list_row(ui, ("search-page", i), &format!("Page {}", self.pages[i].name), i == self.cur);
+                    let (r, resp, _) = list_row(ui, ("search-page", i), &format!("Canvas {}", self.pages[i].name), i == self.cur);
                     paint_glyph_sized(ui.painter(), Pos2::new(r.left() + 24.0, r.center().y), Glyph::File, TEXT_SECONDARY(), 13.0);
                     fig::ptext(&ui.painter().with_clip_rect(r), Pos2::new(r.left() + 40.0, r.center().y), Align2::LEFT_CENTER, &self.pages[i].name, fig::reg(11.0), TEXT());
                     if resp.clicked() {
@@ -1008,9 +1156,11 @@ impl App {
         });
         if let Some(i) = go_page {
             self.switch_page(i);
+            self.in_canvas = true;
             self.search_open = false;
         }
         if let Some(id) = go_layer {
+            self.in_canvas = true;
             self.sel = vec![id];
             self.zoom_fit(true);
             self.search_open = false;
@@ -1019,11 +1169,19 @@ impl App {
 
     // layer rows top-first; children of collapsed containers are skipped
     fn layer_rows(&self, parent: Option<u64>, depth: usize, out: &mut Vec<(usize, usize)>) {
-        for i in (0..self.shapes.len()).rev().filter(|&i| self.shapes[i].parent == parent) {
+        let mut kids: HashMap<Option<u64>, Vec<usize>> = HashMap::new();
+        for (i, s) in self.shapes.iter().enumerate().rev() {
+            kids.entry(s.parent).or_default().push(i); // top first
+        }
+        self.layer_rows_of(&kids, parent, depth, out);
+    }
+
+    fn layer_rows_of(&self, kids: &HashMap<Option<u64>, Vec<usize>>, parent: Option<u64>, depth: usize, out: &mut Vec<(usize, usize)>) {
+        for &i in kids.get(&parent).map_or(&[][..], |v| v.as_slice()) {
             out.push((i, depth));
             let s = &self.shapes[i];
             if s.kind.is_container() && !self.collapsed.contains(&s.id) {
-                self.layer_rows(Some(s.id), depth + 1, out);
+                self.layer_rows_of(kids, Some(s.id), depth + 1, out);
             }
         }
     }
@@ -1046,13 +1204,22 @@ impl App {
     }
 
     fn layers(&mut self, ui: &mut egui::Ui) {
-        self.pages_section(ui);
-        // Layers: a 44px header with Collapse; Find (in the Pages header) adds a search field under it
+        // the open canvas: a 44px header with Back to the list, the canvas name, Find and Collapse; the layers under it
         let r = fig::row(ui, 44.0);
-        fig::text(ui, Pos2::new(r.left() + 16.0, r.top() + 22.0 + fig::TEXT_LIFT * 11.0), Align2::LEFT_CENTER, "Layers", fig::semi(11.0), TEXT());
+        if fig::icon_button(ui, Rect::from_min_size(Pos2::new(r.left() + 8.0, r.top() + 10.0), Vec2::splat(24.0)), Glyph::ChevronLeft, "Back to canvases", false).clicked() {
+            self.in_canvas = false;
+        }
+        let name_clip = Rect::from_min_max(Pos2::new(r.left() + 40.0, r.top()), Pos2::new(r.right() - 68.0, r.bottom()));
+        fig::ptext(&ui.painter().with_clip_rect(name_clip), Pos2::new(r.left() + 40.0, r.top() + 22.0 + fig::TEXT_LIFT * 11.0), Align2::LEFT_CENTER, &self.pages[self.cur].name, fig::semi(11.0), TEXT());
+        if fig::icon_button(ui, Rect::from_min_size(Pos2::new(r.right() - 60.0, r.top() + 10.0), Vec2::splat(24.0)), Glyph::Search, "Search", false).clicked() {
+            self.search_open = true;
+            self.search_query.clear();
+            self.search_focused = false;
+        }
         if fig::icon_button(ui, Rect::from_min_size(Pos2::new(r.right() - 32.0, r.top() + 10.0), Vec2::splat(24.0)), Glyph::CollapseAll, "Collapse layers", false).clicked() {
             self.collapsed = self.shapes.iter().filter(|s| s.kind.is_container()).map(|s| s.id).collect();
         }
+        fig::rule(ui);
         let finding = ui.data(|d| d.get_temp::<bool>(egui::Id::new("find-layers"))).unwrap_or(false) || !self.layer_filter.is_empty();
         if finding {
             search_field(ui, &mut self.layer_filter, "Search layers", "Find layers");
@@ -1082,7 +1249,7 @@ impl App {
         if !pointer_down {
             col_paint = None;
         }
-        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+        egui::ScrollArea::vertical().auto_shrink([false, false]).show_viewport(ui, |ui, viewport| {
             if rows.is_empty() {
                 ui.add_space(14.0);
                 ui.vertical_centered(|ui| {
@@ -1095,7 +1262,11 @@ impl App {
                     }
                 });
             }
-            for &(i, depth) in &rows {
+            // thousands of layers: only the rows in view (and one more each side) are built, the others are space of the same height
+            let first = ((viewport.min.y / 32.0).floor().max(0.0) as usize).min(rows.len());
+            let last = (((viewport.max.y / 32.0).ceil().max(0.0) as usize) + 1).clamp(first, rows.len());
+            ui.add_space(first as f32 * 32.0);
+            for &(i, depth) in &rows[first..last] {
                 let s = &self.shapes[i];
                 // Figma: 32px rows, a 24px highlight inset 8px on the left and flush right, 24px per level;
                 // chevron at 20, icon at 36, name at 51 (11px)
@@ -1135,7 +1306,7 @@ impl App {
                 let name_pos = Pos2::new(rect.left() + 51.3 + dx, rect.center().y);
                 if renaming == Some(s.id) {
                     let mut text = s.name.clone();
-                    let edit_rect = Rect::from_min_max(Pos2::new(name_pos.x - 2.0, rect.min.y + 2.0), Pos2::new(lock.left() - 2.0, rect.max.y - 2.0));
+                    let edit_rect = Rect::from_min_max(Pos2::new(name_pos.x - 4.0, rect.min.y + 2.0), Pos2::new(lock.left() - 2.0, rect.max.y - 2.0));
                     // an explicit id: the row and its editor share a rect, and equal auto ids make egui flash its red clash border
                     let eid = egui::Id::new(("layer-rename", s.id));
                     let r = fig::put(ui, edit_rect, egui::TextEdit::singleline(&mut text).id(eid).font(fig::reg(11.0)).vertical_align(egui::Align::Center));
@@ -1188,6 +1359,7 @@ impl App {
                     });
                 }
             }
+            ui.add_space((rows.len() - last) as f32 * 32.0);
             // drag a row to reorder / reparent: top quarter = above, bottom quarter = below, middle of a container = into
             if drag_start.is_some() {
                 self.row_drag = drag_start;
@@ -1313,7 +1485,10 @@ impl App {
         // button beside it, then the lists 4px under the field
         let head = fig::row(ui, 48.0);
         fig::ptext(ui.painter(), Pos2::new(head.left() + 16.0, head.center().y), Align2::LEFT_CENTER, "Assets", fig::semi(13.0), TEXT());
-        if fig::icon_button(ui, Rect::from_center_size(Pos2::new(head.right() - 24.0, head.center().y), Vec2::splat(24.0)), Glyph::BookOpen, "Add a library", false).clicked() {
+        if fig::icon_button(ui, Rect::from_center_size(Pos2::new(head.right() - 24.0, head.center().y), Vec2::splat(24.0)), Glyph::Close, "Close assets", false).clicked() {
+            self.assets_open = false;
+        }
+        if fig::icon_button(ui, Rect::from_center_size(Pos2::new(head.right() - 52.0, head.center().y), Vec2::splat(24.0)), Glyph::BookOpen, "Add a library", false).clicked() {
             self.add_library();
         }
         fig::row(ui, 13.0);
@@ -1323,7 +1498,7 @@ impl App {
         let field = Rect::from_min_max(Pos2::new(row.left() + 16.0, row.top()), Pos2::new(row.right() - 44.0, row.bottom()));
         fig::input_bg(ui, field, false);
         paint_glyph_sized(ui.painter(), Pos2::new(field.left() + 12.0, field.center().y), Glyph::Search, TEXT(), 13.0);
-        fig::text_edit(ui, field.with_min_x(field.left() + 18.0), &mut filter, "Search assets", "Search assets");
+        fig::text_edit_in(ui, field.with_min_x(field.left() + 18.0), Some(field), &mut filter, "Search assets", "Search assets");
         fig::icon_button(ui, Rect::from_min_size(Pos2::new(row.right() - 36.0, row.top()), Vec2::splat(24.0)), Glyph::Sliders, "Filter assets", false);
         ui.data_mut(|d| d.insert_temp(fid, filter.clone()));
         fig::row(ui, 4.0);
@@ -1654,12 +1829,72 @@ impl App {
         }
     }
 
+    // the left and right panels float over the full-size canvas, 8px in from its edges. Each side hides down to a small bar (`left_pill`,
+    // `right_pill`) and its inner edge drags to a width of 240..=480
+    pub fn floating_panels(&mut self, ctx: &egui::Context, canvas: Rect) {
+        let inset = 8.0;
+        let top = canvas.top() + inset;
+        if self.left_min {
+            self.left_pill(ctx, canvas);
+        } else {
+            let height = (canvas.bottom() - 8.0 - top).max(120.0);
+            let r = Rect::from_min_size(Pos2::new(canvas.left() + inset, top), Vec2::new(self.left_w, height));
+            self.left_w = self.float_panel(ctx, "left-panel", r, true, |a, ui| a.left_panel(ui));
+        }
+        if self.right_min {
+            self.right_pill(ctx, canvas);
+        } else {
+            let height = (canvas.bottom() - 8.0 - top).max(120.0);
+            let r = Rect::from_min_size(Pos2::new(canvas.right() - 8.0 - self.right_w, top), Vec2::new(self.right_w, height));
+            self.right_w = self.float_panel(ctx, "right-panel", r, false, |a, ui| a.right_panel(ui));
+        }
+    }
+
+    // one floating panel in `r`: a card (shadow, `BG`, 1px rule) holding `body`, with a grip on its inner edge; returns the width
+    fn float_panel(&mut self, ctx: &egui::Context, name: &'static str, r: Rect, left: bool, body: impl FnOnce(&mut Self, &mut egui::Ui)) -> f32 {
+        let mut w = r.width();
+        egui::Area::new(egui::Id::new(name)).fixed_pos(r.min).order(egui::Order::Middle).fade_in(false).show(ctx, |ui| {
+            let (card, _) = ui.allocate_exact_size(r.size(), Sense::hover());
+            let radius = crate::R_LARGE as f32;
+            ui.painter().add(egui::Shadow { offset: [0, 2], blur: 12, spread: 0, color: Color32::from_black_alpha(80) }.as_shape(card, radius));
+            ui.painter().rect(card, radius, BG(), Stroke::new(1.0, fig::RULE()), StrokeKind::Inside);
+            let inner = card.shrink(1.0);
+            let mut content = ui.new_child(egui::UiBuilder::new().max_rect(inner));
+            content.set_clip_rect(inner);
+            body(self, &mut content);
+            let edge = if left { card.right() } else { card.left() };
+            let grip = Rect::from_x_y_ranges((edge - 3.0)..=(edge + 3.0), card.y_range());
+            let resp = ui.interact(grip, egui::Id::new((name, "grip")), Sense::drag());
+            resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Other, true, "Resize panel"));
+            if resp.hovered() || resp.dragged() {
+                ctx.set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+            }
+            if resp.dragged() {
+                w = (w + if left { resp.drag_delta().x } else { -resp.drag_delta().x }).clamp(240.0, 480.0);
+            }
+        });
+        w
+    }
+
+    // the hidden right panel: a floating 40px square in the canvas's top-right corner that brings it back
+    pub fn right_pill(&mut self, ctx: &egui::Context, canvas: Rect) {
+        let inset = 8.0;
+        egui::Area::new(egui::Id::new("right-pill")).fixed_pos(Pos2::new(canvas.right() - 8.0 - 40.0, canvas.top() + inset)).order(egui::Order::Foreground).show(ctx, |ui| {
+            let (r, _) = ui.allocate_exact_size(Vec2::splat(40.0), Sense::hover());
+            ui.painter().add(egui::Shadow { offset: [0, 2], blur: 8, spread: 0, color: Color32::from_black_alpha(80) }.as_shape(r, 13.0));
+            ui.painter().rect(r, 13.0, BG(), Stroke::new(1.0, fig::RULE()), StrokeKind::Inside);
+            if fig::icon_button(ui, Rect::from_center_size(r.center(), Vec2::splat(24.0)), Glyph::PanelRight, "Show right panel (Alt+\\)", false).clicked() {
+                self.right_min = false;
+            }
+        });
+    }
+
     // the minimised left panel: a floating 40px bar over the canvas's top-left corner with the file name and
     // the button that brings the panel back
     pub fn left_pill(&mut self, ctx: &egui::Context, canvas: Rect) {
         let title = self.file.file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        let inset = if self.rulers { 18.0 + 8.0 } else { 8.0 };
-        egui::Area::new(egui::Id::new("left-pill")).fixed_pos(canvas.min + Vec2::splat(inset)).order(egui::Order::Foreground).show(ctx, |ui| {
+        let inset = 8.0;
+        egui::Area::new(egui::Id::new("left-pill")).fixed_pos(canvas.min + Vec2::new(inset, inset)).order(egui::Order::Foreground).show(ctx, |ui| {
             let galley = ui.painter().layout_no_wrap(title, fig::semi(13.0), TEXT());
             let (r, _) = ui.allocate_exact_size(Vec2::new(16.0 + galley.size().x + 12.0 + 24.0 + 8.0, 40.0), Sense::hover());
             ui.painter().add(egui::Shadow { offset: [0, 2], blur: 8, spread: 0, color: Color32::from_black_alpha(80) }.as_shape(r, 13.0));
@@ -1695,7 +1930,10 @@ impl App {
                 self.start_present(f);
             }
         }
-        let people = Rect::from_min_max(Pos2::new(top.left() + 16.0, top.top() + 13.0), Pos2::new(pr.left() - 8.0, top.bottom() - 13.0));
+        if fig::icon_button(ui, Rect::from_center_size(Pos2::new(top.left() + 20.0, top.center().y), Vec2::splat(24.0)), Glyph::PanelRight, "Hide right panel (Alt+\\)", false).clicked() {
+            self.right_min = true;
+        }
+        let people = Rect::from_min_max(Pos2::new(top.left() + 44.0, top.top() + 13.0), Pos2::new(pr.left() - 8.0, top.bottom() - 13.0));
         // a child that takes no room in the panel's layout
         let mut people_ui = ui.new_child(egui::UiBuilder::new().max_rect(people).layout(egui::Layout::left_to_right(egui::Align::Center)));
 
@@ -1781,7 +2019,7 @@ impl App {
             fig::dropdown(ui, g.col2(r), None, &mut self.export_scale, &[(0.5, "0.5x"), (1.0, "1x"), (2.0, "2x"), (3.0, "3x"), (4.0, "4x")], "Export scale");
         }
         let r = fig::controls(ui, 8.0);
-        if fig::button(ui, g.full(r), if self.sel.is_empty() { "Export page" } else { "Export selection" }).clicked() {
+        if fig::button(ui, g.full(r), if self.sel.is_empty() { "Export canvas" } else { "Export selection" }).clicked() {
             *act = Some(Act::Export);
         }
         fig::end(ui);
@@ -2155,16 +2393,16 @@ impl App {
     // Figma's toolbelt modes: Draw, Design, Motion and Dev Mode as one strip of icons at the right end of the
     // toolbar, the active one dark with a blue icon
     fn mode_strip(&mut self, ui: &mut egui::Ui) {
-        let (rect, _) = ui.allocate_exact_size(Vec2::new(4.0 * 30.0 + 4.0, 36.0), Sense::hover());
-        ui.painter().rect_filled(rect, 8, fig::INPUT());
+        let (rect, _) = ui.allocate_exact_size(Vec2::new(5.0 * 30.0 + 4.0, 36.0), Sense::hover());
+        ui.painter().rect_filled(rect, R_TOOL, fig::INPUT());
         for (k, (m, label, key)) in [Mode::Draw, Mode::Design, Mode::Motion, Mode::Dev].into_iter().filter_map(|m| Mode::ALL.iter().find(|a| a.0 == m).copied()).enumerate() {
             let b = Rect::from_min_size(rect.min + Vec2::new(2.0 + 30.0 * k as f32, 2.0), Vec2::new(30.0, 32.0));
             let resp = ui.interact(b, ui.id().with(("mode", label)), Sense::click());
             let on = self.mode == m;
             if on {
-                ui.painter().rect_filled(b, 6, crate::theme::SUNKEN());
+                ui.painter().rect_filled(b, R_TOOL - 2, crate::theme::SUNKEN());
             } else if resp.hovered() {
-                ui.painter().rect_filled(b, 6, crate::theme::FIELD_HOVER());
+                ui.painter().rect_filled(b, R_TOOL - 2, crate::theme::FIELD_HOVER());
             }
             paint_glyph_sized(ui.painter(), b.center(), Self::mode_glyph(m), if on { fig::SELECTED_INK() } else { TEXT() }, 16.0);
             resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::RadioButton, true, on, label));
@@ -2173,13 +2411,27 @@ impl App {
                 self.set_mode(m);
             }
         }
+        // Agent mode: ask Claude to change what is clicked; its own color, dark while on
+        let b = Rect::from_min_size(rect.min + Vec2::new(2.0 + 30.0 * 4.0, 2.0), Vec2::new(30.0, 32.0));
+        let resp = ui.interact(b, ui.id().with("agent-mode"), Sense::click());
+        if self.agent.on {
+            ui.painter().rect_filled(b, R_TOOL - 2, crate::theme::SUNKEN());
+        } else if resp.hovered() {
+            ui.painter().rect_filled(b, R_TOOL - 2, crate::theme::FIELD_HOVER());
+        }
+        paint_glyph_sized(ui.painter(), b.center(), Glyph::MessageSquare, fig::AGENT, 16.0);
+        let on = self.agent.on;
+        resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::RadioButton, true, on, "Agent mode"));
+        if resp.tip("Agent mode: ask drui to change a layer").clicked() {
+            self.toggle_agent();
+        }
     }
 
     // Draw toolbar: stroke width (also applied to a selected pencil stroke) and the pressure switch
     fn brush_controls(&mut self, ui: &mut egui::Ui) {
         const WIDTHS: [f32; 7] = [1.0, 2.0, 4.0, 8.0, 12.0, 24.0, 48.0];
         let (rect, resp) = ui.allocate_exact_size(Vec2::new(46.0, 34.0), Sense::click());
-        ui.painter().rect_filled(rect, R_MEDIUM as f32, if resp.hovered() { BG_SECONDARY() } else { Color32::TRANSPARENT });
+        ui.painter().rect_filled(rect, R_TOOL as f32, if resp.hovered() { BG_SECONDARY() } else { Color32::TRANSPARENT });
         let dot = |p: &egui::Painter, c: Pos2, w: f32| p.circle_filled(c, (w / 2.0).clamp(1.0, 7.0), TEXT());
         dot(ui.painter(), rect.left_center() + Vec2::new(12.0, 0.0), self.brush_w);
         fig::ptext(ui.painter(), rect.left_center() + Vec2::new(22.0, 0.0), Align2::LEFT_CENTER, format!("{}", self.brush_w), FontId::proportional(11.0), TEXT());
@@ -2210,7 +2462,7 @@ impl App {
         // the brush: a menu of presets, each with a sample stroke
         use crate::vector::Brush;
         let (rect, resp) = ui.allocate_exact_size(Vec2::new(96.0, 34.0), Sense::click());
-        ui.painter().rect_filled(rect, R_MEDIUM as f32, if resp.hovered() { BG_SECONDARY() } else { Color32::TRANSPARENT });
+        ui.painter().rect_filled(rect, R_TOOL as f32, if resp.hovered() { BG_SECONDARY() } else { Color32::TRANSPARENT });
         brush_sample(ui.painter(), Rect::from_min_size(rect.min + Vec2::new(6.0, 9.0), Vec2::new(26.0, 16.0)), self.brush, self.nib);
         fig::ptext(ui.painter(), rect.left_center() + Vec2::new(36.0, 0.0), Align2::LEFT_CENTER, self.brush.label(), FontId::proportional(11.0), TEXT());
         paint_glyph_sized(ui.painter(), rect.right_center() - Vec2::new(10.0, 0.0), Glyph::ChevronDown, TEXT(), 10.0);
@@ -2285,7 +2537,7 @@ impl App {
     fn tool_caret(&mut self, ui: &mut egui::Ui, name: &str, items: &[(Tool, Glyph, &str, &str)]) {
         let (rect, caret) = ui.allocate_exact_size(Vec2::new(14.0, 34.0), Sense::click());
         if caret.hovered() {
-            ui.painter().rect_filled(rect, R_SMALL as f32 + 1.0, BG_SECONDARY());
+            ui.painter().rect_filled(rect, 7.0, BG_SECONDARY());
         }
         paint_glyph_sized(ui.painter(), rect.center(), Glyph::ChevronDown, TEXT(), 11.0);
         caret.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, name));
@@ -2369,7 +2621,7 @@ impl App {
                 }
                 let (rect, caret) = ui.allocate_exact_size(Vec2::new(14.0, 34.0), Sense::click());
                 if caret.hovered() {
-                    ui.painter().rect_filled(rect, R_SMALL as f32 + 1.0, BG_SECONDARY());
+                    ui.painter().rect_filled(rect, 7.0, BG_SECONDARY());
                 }
                 paint_glyph_sized(ui.painter(), rect.center(), Glyph::ChevronDown, TEXT(), 11.0);
                 caret.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Frame tools"));
@@ -2399,7 +2651,7 @@ impl App {
                 }
                 let (rect, caret) = ui.allocate_exact_size(Vec2::new(14.0, 34.0), Sense::click());
                 if caret.hovered() {
-                    ui.painter().rect_filled(rect, R_SMALL as f32 + 1.0, BG_SECONDARY());
+                    ui.painter().rect_filled(rect, 7.0, BG_SECONDARY());
                 }
                 paint_glyph_sized(ui.painter(), rect.center(), Glyph::ChevronDown, TEXT(), 11.0);
                 egui::Popup::menu(&caret).show(|ui| {
@@ -2453,21 +2705,22 @@ impl App {
             });
         });
 
-        // the help button, bottom right of the canvas
-        egui::Area::new(egui::Id::new("help")).pivot(Align2::RIGHT_BOTTOM).fixed_pos(self.view.right_bottom() - Vec2::splat(16.0)).order(egui::Order::Foreground).show(ctx, |ui| {
-            let (rect, resp) = ui.allocate_exact_size(Vec2::splat(32.0), Sense::click());
-            let fill = if self.show_help || resp.hovered() { BG_SECONDARY() } else { BG() };
-            ui.painter().circle(rect.center(), 16.0, fill, Stroke::new(1.0, BG_PRESSED()));
-            paint_glyph_sized(ui.painter(), rect.center(), Glyph::Help, TEXT(), 16.0);
-            if resp.tip("Keyboard shortcuts (?)").clicked() {
-                self.show_help ^= true;
-            }
-        });
+        // the help button, bottom right of the canvas (not in agent mode, which has no panels)
+        if !self.agent.on {
+            egui::Area::new(egui::Id::new("help")).pivot(Align2::RIGHT_BOTTOM).fixed_pos(self.view.right_bottom() - Vec2::splat(16.0)).order(egui::Order::Foreground).show(ctx, |ui| {
+                let (rect, resp) = ui.allocate_exact_size(Vec2::splat(32.0), Sense::click());
+                let fill = if self.show_help || resp.hovered() { BG_SECONDARY() } else { BG() };
+                ui.painter().circle(rect.center(), 16.0, fill, Stroke::new(1.0, BG_PRESSED()));
+                paint_glyph_sized(ui.painter(), rect.center(), Glyph::Help, TEXT(), 16.0);
+                if resp.tip("Keyboard shortcuts (?)").clicked() {
+                    self.show_help ^= true;
+                }
+            });
+        }
 
         // what to do next, for the active tool
         if let Some(h) = self.hint() {
-            let ruler = if self.rulers { 18.0 } else { 0.0 };
-            egui::Area::new(egui::Id::new("hint")).pivot(Align2::CENTER_TOP).fixed_pos(self.view.center_top() + Vec2::new(0.0, ruler + 10.0)).order(egui::Order::Foreground).interactable(false).show(ctx, |ui| {
+            egui::Area::new(egui::Id::new("hint")).pivot(Align2::CENTER_TOP).fixed_pos(self.view.center_top() + Vec2::new(0.0, 10.0)).order(egui::Order::Foreground).interactable(false).show(ctx, |ui| {
                 egui::Frame::new().fill(BG().gamma_multiply(0.92)).stroke(Stroke::new(1.0, BG_PRESSED())).corner_radius(R_LARGE).inner_margin(egui::Margin::symmetric(12, 6)).show(ui, |ui| {
                     ui.label(RichText::new(h).color(TEXT_SECONDARY()).size(11.5));
                 });
@@ -2493,7 +2746,7 @@ impl App {
 
         let mut open = self.show_help;
         egui::Window::new("Keyboard shortcuts").open(&mut open).collapsible(false).resizable(false).anchor(Align2::CENTER_CENTER, [0.0, 0.0]).show(ctx, |ui| {
-            let rows: [(&str, &str); 35] = [
+            let rows: [(&str, &str); 33] = [
                 ("V  F  R  O  L  T  P  C", "Move, Frame, Rectangle, Ellipse, Line, Text, Pen, Comment"),
                 ("Shift+P", "Pencil (freehand)"),
                 ("Shift+D", "Dev Mode: inspect, CSS, distances (read-only)"),
@@ -2514,7 +2767,6 @@ impl App {
                 ("Ctrl+Shift+K", "Combine components as variants"),
                 ("Shift+H / V", "Flip horizontally, vertically"),
                 ("Arrows", "Nudge 1 px (Shift: 10 px)"),
-                ("Shift+R", "Rulers"),
                 ("Shift+0 / 1 / 2", "Zoom to 100%, fit, selection"),
                 ("Ctrl +  /  Ctrl -", "Zoom in, out"),
                 ("Scroll, middle-drag", "Pan"),
@@ -2523,7 +2775,6 @@ impl App {
                 ("Shift+drag", "Constrain axis, proportions or angle"),
                 ("Double-click", "Edit text or path, select inside a group"),
                 ("Right-click", "Context menu"),
-                ("Drag from a ruler", "Create a guide (drag it back to delete)"),
                 ("Drag a layer row", "Reorder or move into a frame or group"),
                 ("Drop an image file", "Place it on the canvas"),
                 ("Pen: click-drag", "Pull out a smooth point"),

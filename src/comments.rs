@@ -61,7 +61,7 @@ pub(crate) fn avatar(p: &egui::Painter, c: Pos2, r: f32, name: &str) {
 }
 
 // the pin: a rounded square with a sharp bottom-left corner, optionally holding an avatar
-fn draw_pin(p: &egui::Painter, tip: Pos2, fill: Color32, who: Option<&str>) {
+pub(crate) fn draw_pin(p: &egui::Painter, tip: Pos2, fill: Color32, who: Option<&str>) {
     let r = pin_rect(tip);
     p.add(egui::Shadow { offset: [0, 2], blur: 6, spread: 0, color: Color32::from_black_alpha(70) }.as_shape(r, 16.0));
     p.rect_filled(r, pin_corners(), fill);
@@ -70,15 +70,38 @@ fn draw_pin(p: &egui::Painter, tip: Pos2, fill: Color32, who: Option<&str>) {
     }
 }
 
-fn thread_frame() -> egui::Frame {
+// the messages of a thread box (a comment, an agent box): never shorter than THREAD_MIN_H, never taller than half the canvas (at most
+// THREAD_MAX_H), scrolling beyond that with the newest message in view
+const THREAD_MIN_H: f32 = 96.0;
+const THREAD_MAX_H: f32 = 480.0;
+pub(crate) fn thread_scroll<R>(ui: &mut egui::Ui, id: impl std::hash::Hash + std::fmt::Debug, canvas_h: f32, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    let max = (canvas_h * 0.5).clamp(THREAD_MIN_H, THREAD_MAX_H);
+    egui::ScrollArea::vertical()
+        .id_salt(id)
+        .max_height(max)
+        .auto_shrink([false, true])
+        .stick_to_bottom(true)
+        .show(ui, |ui| {
+            ui.set_min_height(THREAD_MIN_H);
+            add(ui)
+        })
+        .inner
+}
+
+pub(crate) fn thread_frame() -> egui::Frame {
     egui::Frame::NONE.fill(BG()).corner_radius(crate::R_LARGE).stroke(Stroke::new(1.0, fig::RULE())).shadow(egui::Shadow { offset: [0, 4], blur: 16, spread: 0, color: Color32::from_black_alpha(90) })
 }
 
 // the round send button: grey while there is nothing to send, blue once there is
 fn send_button(ui: &mut egui::Ui, center: Pos2, active: bool, name: &str) -> bool {
+    send_button_with(ui, center, active, name, fig::SHARE)
+}
+
+// the same in another accent (agent mode's)
+pub(crate) fn send_button_with(ui: &mut egui::Ui, center: Pos2, active: bool, name: &str, accent: Color32) -> bool {
     let r = Rect::from_center_size(center, Vec2::splat(AVATAR));
     let resp = ui.interact(r, ui.id().with(("send", name)), Sense::click());
-    ui.painter().circle_filled(center, AVATAR / 2.0, if active { fig::SHARE } else { SEND_OFF });
+    ui.painter().circle_filled(center, AVATAR / 2.0, if active { accent } else { SEND_OFF });
     paint_glyph_sized(ui.painter(), center, Glyph::ArrowUp, if active { Color32::WHITE } else { BG() }, 13.0);
     resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, active, name));
     active && resp.clicked()
@@ -309,7 +332,7 @@ impl App {
             let (r, _) = ui.allocate_exact_size(Vec2::new(COMPOSER_W, COMPOSER_H), Sense::hover());
             ui.painter().rect(r, 12, BG(), Stroke::new(2.0, fig::SHARE), StrokeKind::Inside);
             let edit_r = Rect::from_min_max(Pos2::new(r.left() + 8.0, r.top()), Pos2::new(r.right() - 72.0, r.bottom()));
-            let out = fig::text_edit(ui, edit_r, &mut text, "New comment", "Add a comment (@ to mention)");
+            let out = fig::text_edit_in(ui, edit_r, None, &mut text, "New comment", "Add a comment (@ to mention)");
             let pic = Rect::from_center_size(Pos2::new(r.right() - 16.0 - AVATAR - AVATAR / 2.0, r.center().y), Vec2::splat(AVATAR));
             let attached = !self.pending_attach.is_empty();
             if fig::icon_button(ui, pic, Glyph::Image, if attached { "A picture is attached: click to add another" } else { "Attach a picture" }, attached).clicked() {
@@ -384,6 +407,7 @@ impl App {
                 });
                 fig::rule(ui);
                 let editing: Option<usize> = ui.data(|d| d.get_temp(Id::new(("msg-edit", id))));
+                thread_scroll(ui, ("comment-scroll", id), canvas.height(), |ui| {
                 for (n, (who, secs, text, edited, pics)) in std::iter::once((c.author.clone(), c.secs, c.text.clone(), c.edited, c.attachments.clone())).chain(c.replies.iter().map(|r| (r.author.clone(), r.secs, r.text.clone(), r.edited, r.attachments.clone()))).enumerate() {
                     if editing == Some(n) {
                         // the message being edited: a field in its place
@@ -394,7 +418,7 @@ impl App {
                         let did = Id::new(("msg-edit-draft", id, n));
                         let mut draft: String = ui.data(|d| d.get_temp(did)).unwrap_or(text.clone());
                         let edit_r = Rect::from_min_max(field.min + Vec2::new(4.0, 0.0), Pos2::new(field.right() - 40.0, field.bottom()));
-                        let out = fig::text_edit(ui, edit_r, &mut draft, "Edit message", "Edit message");
+                        let out = fig::text_edit_in(ui, edit_r, None, &mut draft, "Edit message", "Edit message");
                         ui.painter().rect_stroke(field, 12, Stroke::new(2.0, fig::SHARE), StrokeKind::Inside);
                         if !out.has_focus() {
                             out.request_focus();
@@ -411,6 +435,7 @@ impl App {
                         pending = Some((n, act));
                     }
                 }
+                });
                 // the reply field: avatar, then a rounded field that turns blue while typing
                 let rid = Id::new(("reply-draft", id));
                 let mut draft: String = ui.data(|d| d.get_temp(rid)).unwrap_or_default();
@@ -419,7 +444,7 @@ impl App {
                 let field = Rect::from_min_max(Pos2::new(row.left() + 48.0, row.top() + 12.0), Pos2::new(row.right() - 16.0, row.bottom() - 12.0));
                 let edit_r = Rect::from_min_max(field.min + Vec2::new(4.0, 0.0), Pos2::new(field.right() - 68.0, field.bottom()));
                 fig::input_bg_r(ui, field, 12);
-                let out = fig::text_edit(ui, edit_r, &mut draft, "Reply", "Reply (@ to mention)");
+                let out = fig::text_edit_in(ui, edit_r, None, &mut draft, "Reply", "Reply (@ to mention)");
                 if out.has_focus() {
                     ui.painter().rect_stroke(field, 12, Stroke::new(2.0, fig::SHARE), StrokeKind::Inside);
                 }

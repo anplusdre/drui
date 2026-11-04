@@ -68,26 +68,41 @@ impl App {
         out
     }
 
-    // a frame exactly around shape `id`, which moves inside it
-    fn wrap_in_frame(&mut self, id: u64) -> Option<u64> {
-        let i = self.index_of(id)?;
-        let parent = self.shapes[i].parent;
-        let r = self.shapes[i].aabb();
+    // a frame exactly around the shapes `ids`, which move inside it (it goes where the topmost of them is, in that one's parent)
+    fn wrap_in_frame(&mut self, ids: &[u64]) -> Option<u64> {
+        let idx: Vec<usize> = ids.iter().filter_map(|&id| self.index_of(id)).collect();
+        let top = *idx.iter().max()?;
+        let parent = self.shapes[top].parent;
+        let bb = idx.iter().map(|&i| self.world_rect(i)).reduce(|a, b| a.union(b))?;
         let fid = self.new_id();
-        let mut f = Shape::new(Kind::Frame, fid, self.shapes.len() + 1, r.min, parent);
-        f.size = r.size();
+        let mut f = Shape::new(Kind::Frame, fid, self.shapes.len() + 1, bb.min - self.origin_of(parent), parent);
+        f.size = bb.size();
         f.fills.clear();
         f.clip = false;
-        self.shapes.insert(i + 1, f);
-        let i = self.index_of(id)?;
-        self.shapes[i].parent = Some(fid);
-        self.shapes[i].pos -= r.min.to_vec2();
+        let worlds: Vec<(u64, Pos2)> = idx.iter().map(|&i| (self.shapes[i].id, self.shapes[i].pos + self.origin_of(self.shapes[i].parent))).collect();
+        self.shapes.insert(top + 1, f);
+        for (id, world) in worlds {
+            let i = self.index_of(id)?;
+            self.shapes[i].parent = Some(fid);
+            self.shapes[i].pos = world - bb.min.to_vec2();
+        }
         Some(fid)
     }
 
+    // Ctrl+Alt+K. Frames each become a component; other layers, selected together, become one component that holds them all
     pub fn make_component(&mut self) {
+        let roots = self.sel_roots();
+        if roots.len() > 1 && roots.iter().any(|&id| self.index_of(id).is_some_and(|i| self.shapes[i].kind != Kind::Frame)) {
+            if let Some(t) = self.wrap_in_frame(&roots).and_then(|f| self.index_of(f)) {
+                self.shapes[t].component = true;
+                self.shapes[t].instance = false;
+                self.shapes[t].src = None;
+                self.sel = vec![self.shapes[t].id];
+            }
+            return;
+        }
         let mut out = vec![];
-        for id in self.sel_roots() {
+        for id in roots {
             let Some(i) = self.index_of(id) else { continue };
             let target = match self.shapes[i].kind {
                 Kind::Frame => id,
@@ -97,7 +112,7 @@ impl App {
                     self.shapes[i].fills.clear();
                     id
                 }
-                _ => match self.wrap_in_frame(id) {
+                _ => match self.wrap_in_frame(&[id]) {
                     Some(f) => f,
                     None => continue,
                 },

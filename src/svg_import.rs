@@ -99,7 +99,46 @@ pub(crate) fn contours(path: &usvg::Path) -> Vec<Contour> {
     out
 }
 
+// SVG path data (the `d` of a <path>: M L H V C S Q T A Z, absolute or relative) as contours in the path's own coordinates; Err when it draws nothing
+pub(crate) fn path_contours(d: &str) -> Result<Vec<Contour>, String> {
+    fn walk(g: &usvg::Group, out: &mut Vec<Contour>) {
+        for n in g.children() {
+            match n {
+                usvg::Node::Group(g) => walk(g, out),
+                usvg::Node::Path(p) => out.extend(contours(p)),
+                _ => {}
+            }
+        }
+    }
+    let esc = d.replace('&', "&amp;").replace('"', "&quot;").replace('<', "&lt;");
+    let svg = format!("<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"4096\" height=\"4096\"><path fill=\"#000\" stroke=\"#000\" d=\"{esc}\"/></svg>");
+    let tree = usvg::Tree::from_str(&svg, &usvg::Options::default()).map_err(|e| format!("path data: {e}"))?;
+    let mut out = vec![];
+    walk(tree.root(), &mut out);
+    if out.is_empty() { Err("path data draws nothing: check the d string (it needs a move and at least one more point)".into()) } else { Ok(out) }
+}
+
 impl App {
+    // an SVG document as a frame of path layers at `pos` in `parent` (POST /patch's `svg`); the frame's id
+    pub(crate) fn svg_frame(&mut self, text: &str, parent: Option<u64>, pos: Pos2, name: &str) -> Result<u64, String> {
+        let opt = usvg::Options { fontdb: crate::export::fonts(), ..usvg::Options::default() };
+        let tree = usvg::Tree::from_str(text, &opt).map_err(|e| format!("svg: {e}"))?;
+        let fid = self.new_id();
+        let mut frame = Shape::new(Kind::Frame, fid, self.shapes.len() + 1, pos, parent);
+        frame.name = name.into();
+        frame.size = Vec2::new(tree.size().width(), tree.size().height());
+        frame.fills.clear();
+        frame.clip = false;
+        let mut paths = vec![];
+        self.svg_paths(tree.root(), fid, &mut paths);
+        if paths.is_empty() {
+            return Err("svg: nothing to draw (paths, rectangles, circles and lines are drawn; text, images and filters are not)".into());
+        }
+        self.shapes.push(frame);
+        self.shapes.extend(paths);
+        Ok(fid)
+    }
+
     fn svg_paths(&mut self, group: &usvg::Group, frame: u64, out: &mut Vec<Shape>) {
         for node in group.children() {
             match node {

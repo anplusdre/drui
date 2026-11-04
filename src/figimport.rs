@@ -60,7 +60,7 @@ pub struct Summary {
 
 impl Summary {
     pub fn text(&self) -> String {
-        let mut s = format!("imported {} page{}, {} layers", self.pages, if self.pages == 1 { "" } else { "s" }, self.layers);
+        let mut s = format!("imported {} canvas{}, {} layers", self.pages, if self.pages == 1 { "" } else { "es" }, self.layers);
         if self.instances > 0 {
             s += &format!(", {} instances", self.instances);
         }
@@ -86,7 +86,32 @@ impl Summary {
     }
 }
 
+// what an import running on another thread tells the window: what it is doing and how far along it is (layers made of the nodes there are)
+#[derive(Default)]
+pub struct ImportProgress {
+    pub stage: std::sync::Mutex<String>,
+    pub done: std::sync::atomic::AtomicUsize,
+    pub total: std::sync::atomic::AtomicUsize,
+    pub size: std::sync::atomic::AtomicUsize, // bytes of the file, once read
+}
+
+// an import running on its own thread (see `App::import_fig`)
+pub struct FigImport {
+    rx: std::sync::mpsc::Receiver<Result<(Doc, Summary), String>>,
+    pub progress: std::sync::Arc<ImportProgress>,
+    path: std::path::PathBuf,
+    started: std::time::Instant,
+    ready: Option<(Doc, Summary)>, // done: the document opens on the next frame, after one that says so
+}
+
+impl ImportProgress {
+    fn stage(&self, s: impl Into<String>) {
+        *self.stage.lock().unwrap_or_else(|e| e.into_inner()) = s.into();
+    }
+}
+
 pub(crate) struct Importer<'a> {
+    progress: Option<std::sync::Arc<ImportProgress>>,
     file: &'a FigFile,
     blobs: &'a [Val],
     nodes: HashMap<Guid, &'a Val>,
@@ -148,7 +173,7 @@ impl<'a> Importer<'a> {
                 (p, v.into_iter().map(|(_, g)| g).collect())
             })
             .collect();
-        Importer { file, blobs, nodes, kids, parent_of, built: HashMap::new(), page_nodes: HashSet::new(), busy: HashSet::new(), image_ids: HashMap::new(), images: vec![], videos: vec![], summary: Summary::default(), count: 0, pending_ix: vec![], var_ids: HashMap::new(), fonts: Default::default(), flipped: false, cur_shape: 0, pending_patterns: vec![], var_names: HashMap::new() }
+        Importer { progress: None, file, blobs, nodes, kids, parent_of, built: HashMap::new(), page_nodes: HashSet::new(), busy: HashSet::new(), image_ids: HashMap::new(), images: vec![], videos: vec![], summary: Summary::default(), count: 0, pending_ix: vec![], var_ids: HashMap::new(), fonts: Default::default(), flipped: false, cur_shape: 0, pending_patterns: vec![], var_names: HashMap::new() }
     }
 
     fn kids_of(&self, g: Guid) -> Vec<Guid> {
@@ -556,9 +581,10 @@ impl<'a> Importer<'a> {
             }
         }
         if n.get("stackChildPrimaryGrow").is_some() || n.get("stackChildAlignSelf").is_some() {
-            // the direction is the parent's; it is applied when the layer is placed (see `place_in_layout`)
-            s.fill_x = n.f("stackChildPrimaryGrow").unwrap_or(0.0) > 0.0;
-            s.fill_y = n.s("stackChildAlignSelf") == Some("STRETCH");
+            // the axes are the parent's: along its direction a layer grows (PrimaryGrow), across it it stretches (AlignSelf)
+            let (grow, stretch) = (n.f("stackChildPrimaryGrow").unwrap_or(0.0) > 0.0, n.s("stackChildAlignSelf") == Some("STRETCH"));
+            let vertical = s.parent.and_then(|p| app.index_of(p)).and_then(|i| app.shapes[i].layout.as_ref()).is_some_and(|l| l.vertical);
+            (s.fill_x, s.fill_y) = if vertical { (stretch, grow) } else { (grow, stretch) };
         }
         if n.s("stackPositioning") == Some("ABSOLUTE") {
             s.abs = true;
@@ -1020,7 +1046,7 @@ impl<'a> Importer<'a> {
         // pattern fills now know the layer they repeat
         for (id, spec) in std::mem::take(&mut self.pending_patterns) {
             let (Some(i), Some(&src)) = (app.index_of(id), self.built.get(&spec.source)) else {
-                *self.summary.skipped.entry("pattern fills (the repeated layer is not on this page)".into()).or_default() += 1;
+                *self.summary.skipped.entry("pattern fills (the repeated layer is not on this canvas)".into()).or_default() += 1;
                 continue;
             };
             let src_size = app.index_of(src).map_or(Vec2::splat(1.0), |k| app.shapes[k].size.max(Vec2::splat(1.0)));
@@ -1052,6 +1078,9 @@ impl<'a> Importer<'a> {
     fn new_shape(&mut self, app: &mut App, kind: Kind, parent: Option<u64>) -> Shape {
         let id = app.new_id();
         self.count += 1;
+        if let Some(p) = &self.progress {
+            p.done.store(self.count, std::sync::atomic::Ordering::Relaxed);
+        }
         let mut s = Shape::new(kind, id, self.count, Pos2::ZERO, parent);
         s.fills.clear();
         s.strokes.clear();
@@ -1506,30 +1535,55 @@ fn gradient_from_transform(g: &mut Gradient, t: &Val, size: Vec2) {
 impl App {
     // the document of a .fig file: one page per canvas
     pub fn doc_from_fig(bytes: &[u8]) -> Result<(Doc, Summary), String> {
+        Self::doc_from_fig_with(bytes, None)
+    }
+
+    // the same, telling `progress` what it is doing (it is read by the window while this runs on another thread)
+    pub fn doc_from_fig_with(bytes: &[u8], progress: Option<std::sync::Arc<ImportProgress>>) -> Result<(Doc, Summary), String> {
+        if let Some(p) = &progress {
+            p.stage("Unzipping and decoding the file");
+        }
         let file = figfile::read(bytes)?;
-        Self::doc_from_file(&file)
+        Self::doc_from_file_with(&file, progress)
     }
 
     pub(crate) fn doc_from_file(file: &FigFile) -> Result<(Doc, Summary), String> {
+        Self::doc_from_file_with(file, None)
+    }
+
+    fn doc_from_file_with(file: &FigFile, progress: Option<std::sync::Arc<ImportProgress>>) -> Result<(Doc, Summary), String> {
         let mut imp = Importer::new(file);
+        if let Some(p) = &progress {
+            p.stage("Reading the layers");
+            p.total.store(imp.nodes.len(), std::sync::atomic::Ordering::Relaxed);
+        }
+        imp.progress = progress.clone();
+        let say = |s: String| {
+            if let Some(p) = &progress {
+                p.stage(s);
+            }
+        };
         let doc_guid = imp.nodes.iter().find(|(_, n)| n.s("type") == Some("DOCUMENT")).map(|(g, _)| *g).ok_or("this file has no document")?;
         let canvases: Vec<Guid> = imp.kids_of(doc_guid).into_iter().filter(|&c| imp.ty(c) == "CANVAS" && imp.nodes[&c].b("internalOnly") != Some(true)).collect();
         if canvases.is_empty() {
-            return Err("this file has no pages".into());
+            return Err("this file has no canvases".into());
         }
         let mut app = App::default();
+        say("Importing variables and modes".into());
         let variables = imp.import_variables(&mut app);
         let mut pages = vec![];
-        for c in &canvases {
+        for (pi, c) in canvases.iter().enumerate() {
             imp.built.clear();
             imp.collect_page(*c);
             app.shapes.clear();
             let node = imp.nodes[c];
+            say(format!("Building canvas {} of {}: {}", pi + 1, canvases.len(), node.s("name").unwrap_or("Canvas")));
             for k in imp.kids_of(*c) {
                 imp.build(&mut app, k, None);
             }
+            say(format!("Linking prototype interactions on canvas {} of {}", pi + 1, canvases.len()));
             imp.finish_page(&mut app);
-            let mut page = Page { name: node.s("name").unwrap_or("Page").to_owned(), shapes: std::mem::take(&mut app.shapes), ..Page::default() };
+            let mut page = Page { name: node.s("name").unwrap_or("Canvas").to_owned(), shapes: std::mem::take(&mut app.shapes), ..Page::default() };
             if let (Some(bg), true) = (node.get("backgroundColor"), node.b("backgroundEnabled") != Some(false)) {
                 page.background = color(bg, node.f("backgroundOpacity").unwrap_or(1.0));
             }
@@ -1546,8 +1600,110 @@ impl App {
         Ok((doc, summary))
     }
 
-    // File > Import Figma file: the .fig becomes the open document (a new one: it is saved next to the .fig as `<name>.json`)
+    // File > Import Figma file: the .fig is read on a thread of its own while the window shows what it is doing (`fig_import_overlay`);
+    // when it is done the result becomes the open document (a new one: it is saved next to the .fig as `<name>.json`)
     pub fn import_fig(&mut self, path: std::path::PathBuf) {
+        if self.fig_import.is_some() {
+            self.status = "a Figma file is already being imported".into();
+            return;
+        }
+        let progress = std::sync::Arc::new(ImportProgress::default());
+        progress.stage("Reading the file from disk");
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (p, from) = (progress.clone(), path.clone());
+        // a big file nests deeply: the thread gets a roomy stack
+        let spawned = std::thread::Builder::new().name("fig-import".into()).stack_size(64 << 20).spawn(move || {
+            let result = std::fs::read(&from).map_err(|e| format!("could not read the file: {e}")).and_then(|bytes| {
+                p.size.store(bytes.len(), std::sync::atomic::Ordering::Relaxed);
+                Self::doc_from_fig_with(&bytes, Some(p.clone()))
+            });
+            let _ = tx.send(result);
+        });
+        match spawned {
+            Ok(_) => self.fig_import = Some(FigImport { rx, progress, path, started: std::time::Instant::now(), ready: None }),
+            Err(e) => self.status = format!("could not start the import: {e}"),
+        }
+    }
+
+    // once a frame: takes the finished import (the document opens a frame after the overlay says so) or its failure
+    pub fn fig_import_tick(&mut self, ctx: &egui::Context) {
+        use std::sync::mpsc::TryRecvError;
+        let Some(imp) = self.fig_import.as_mut() else { return };
+        if let Some((doc, summary)) = imp.ready.take() {
+            let save_as = imp.path.with_extension("json");
+            self.fig_import = None;
+            self.open_doc(doc, save_as);
+            self.status = summary.text();
+            return;
+        }
+        let name = imp.path.display().to_string();
+        match imp.rx.try_recv() {
+            Ok(Ok(done)) => {
+                imp.progress.stage("Opening the document");
+                imp.ready = Some(done);
+                ctx.request_repaint();
+            }
+            Ok(Err(e)) => {
+                self.fig_import = None;
+                self.status = format!("could not import {name}: {e}");
+            }
+            Err(TryRecvError::Disconnected) => {
+                self.fig_import = None;
+                self.status = format!("could not import {name}: the import stopped unexpectedly");
+            }
+            Err(TryRecvError::Empty) => ctx.request_repaint_after(std::time::Duration::from_millis(50)),
+        }
+    }
+
+    // a card over the whole window (it takes the clicks) with the stage, a bar and the time while a .fig is imported
+    pub fn fig_import_overlay(&self, ctx: &egui::Context) {
+        use crate::{BG, R_LARGE, TEXT, TEXT_SECONDARY, TEXT_TERTIARY};
+        use egui::{Align2, Rect, Sense, Stroke, StrokeKind};
+        let Some(imp) = &self.fig_import else { return };
+        let screen = ctx.content_rect();
+        let stage = imp.progress.stage.lock().map(|s| s.clone()).unwrap_or_default();
+        let (done, total, size) = {
+            use std::sync::atomic::Ordering::Relaxed;
+            (imp.progress.done.load(Relaxed), imp.progress.total.load(Relaxed), imp.progress.size.load(Relaxed))
+        };
+        let elapsed = imp.started.elapsed().as_secs_f32();
+        let file = imp.path.file_name().map_or_else(|| "file".into(), |n| n.to_string_lossy().into_owned());
+        egui::Area::new(egui::Id::new("fig-import")).fixed_pos(screen.min).order(egui::Order::Foreground).show(ctx, |ui| {
+            let (_, _) = ui.allocate_exact_size(screen.size(), Sense::click_and_drag()); // nothing under the card can be used meanwhile
+            let p = ui.painter();
+            p.rect_filled(screen, 0.0, egui::Color32::from_black_alpha(140));
+            let card = Rect::from_center_size(screen.center(), egui::vec2(380.0, 128.0));
+            p.add(egui::Shadow { offset: [0, 2], blur: 8, spread: 0, color: egui::Color32::from_black_alpha(80) }.as_shape(card, R_LARGE as f32));
+            p.rect(card, R_LARGE as f32, BG(), Stroke::new(1.0, crate::fig::RULE()), StrokeKind::Inside);
+            let x = card.left() + 20.0;
+            crate::fig::ptext(p, egui::pos2(x, card.top() + 28.0), Align2::LEFT_CENTER, format!("Importing {file}"), crate::fig::semi(13.0), TEXT());
+            crate::fig::ptext(p, egui::pos2(x, card.top() + 52.0), Align2::LEFT_CENTER, &stage, crate::fig::reg(11.0), TEXT_SECONDARY());
+            // the bar fills as layers are made; before there is a count (unzipping, decoding) a stretch of it slides along
+            let bar = Rect::from_min_size(egui::pos2(x, card.top() + 70.0), egui::vec2(card.width() - 40.0, 6.0));
+            p.rect_filled(bar, 3.0, crate::fig::INPUT());
+            let fill = if done > 0 && total > 0 {
+                let f = (done as f32 / total as f32).clamp(0.0, 0.98);
+                Rect::from_min_size(bar.min, egui::vec2(bar.width() * f, bar.height()))
+            } else {
+                let t = (ctx.input(|i| i.time) as f32 * 0.9).fract();
+                let w = bar.width() * 0.3;
+                let left = bar.left() + (bar.width() - w) * (1.0 - (2.0 * t - 1.0).abs());
+                Rect::from_min_size(egui::pos2(left, bar.top()), egui::vec2(w, bar.height()))
+            };
+            p.rect_filled(fill, 3.0, crate::fig::SHARE);
+            let mb = size as f32 / 1_048_576.0;
+            let detail = match (done > 0, size > 0) {
+                (true, _) => format!("{done} of about {total} layers · {mb:.1} MB · {elapsed:.0} s"),
+                (false, true) => format!("{mb:.1} MB · {elapsed:.0} s"),
+                _ => format!("{elapsed:.0} s"),
+            };
+            crate::fig::ptext(p, egui::pos2(x, card.top() + 96.0), Align2::LEFT_CENTER, detail, crate::fig::reg(10.0), TEXT_TERTIARY());
+        });
+        ctx.request_repaint_after(std::time::Duration::from_millis(50));
+    }
+
+    // the same, on this thread: for the REST API, which answers once the file is in
+    pub fn import_fig_now(&mut self, path: std::path::PathBuf) {
         let bytes = match std::fs::read(&path) {
             Ok(b) => b,
             Err(e) => {

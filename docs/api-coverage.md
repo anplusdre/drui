@@ -26,7 +26,7 @@ The routes are listed by `GET /` and explained in `GET /guide`.
 | Branches: create, open, ask for review, merge when approved, delete when unchanged | `/branches` |
 | Libraries: add, update, publish | `/libraries` |
 | The whole document as JSON | `GET /doc` |
-| Preferences and view state: panel tab, snapping, rulers, pixel grid and preview, guides, zoom, mode, color profile, nudge, mirror handles, labels | `GET/PUT /view` |
+| Preferences and view state: panel tab, snapping, pixel grid and preview, guides, zoom, mode, color profile, nudge, mirror handles, labels | `GET/PUT /view` |
 | Motion timeline: playhead, length, loop, play | `GET/PUT /motion` |
 | Cut, eraser, shape builder, paint, driven by coordinates | `POST /tools/{cut,erase,builder,paint}` |
 | Present and leave it | `POST/DELETE /present` |

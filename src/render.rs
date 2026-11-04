@@ -108,17 +108,51 @@ impl App {
         s.fills.iter().rev().find(|f| f.visible).map(|f| self.paint_color(f)).unwrap_or(Color32::BLACK)
     }
 
-    fn screen_polys(&self, origin: Pos2, s: &Shape, offset: Vec2) -> Vec<Poly> {
-        s.polys(self.zoom)
-            .into_iter()
+    // the outlines of `s` in its parent's space and on the screen. Curves are cut for the zoom in half-octave steps, so the same
+    // outline (and its cached triangles) serves a stretch of zooming.
+    fn screen_polys(&self, origin: Pos2, s: &Shape, offset: Vec2) -> (Vec<Poly>, Vec<Poly>) {
+        crate::prof::lap("fill: before polys");
+        let cut_for = 2f32.powf((self.zoom.max(0.02).log2() * 2.0).round() / 2.0);
+        let local = s.polys(cut_for);
+        crate::prof::lap("fill: s.polys (flatten)");
+        let screen = local
+            .iter()
+            .cloned()
             .map(|mut p| {
                 p.pts.iter_mut().for_each(|q| *q = self.to_screen(origin, *q + offset));
                 p
             })
-            .collect()
+            .collect();
+        crate::prof::lap("fill: to screen");
+        (local, screen)
     }
 
-    fn fill_polys(&self, painter: &Painter, polys: &[Poly], paint: &Paint, bounds: Rect, alpha: f32) {
+    // triangles for the closed outlines, from the cache when this exact outline was cut before: it is worked out in the world, where
+    // panning and zooming do not change it, and only moved to the screen here
+    fn triangulated(&self, painter: &Painter, local: &[Poly], origin: Pos2, offset: Vec2) -> (Vec<Pos2>, Vec<u32>) {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        for p in local {
+            (p.closed, p.hole, p.pts.len()).hash(&mut h);
+            for q in &p.pts {
+                (q.x.to_bits(), q.y.to_bits()).hash(&mut h);
+            }
+        }
+        let key = h.finish();
+        let pass = painter.ctx().cumulative_pass_nr();
+        let mut cache = self.tri_cache.borrow_mut();
+        if cache.len() > 3000 {
+            cache.retain(|_, (_, _, used)| pass.saturating_sub(*used) < 120);
+        }
+        let (verts, idx, used) = cache.entry(key).or_insert_with(|| {
+            let (v, i) = triangulate(local);
+            (v, i, pass)
+        });
+        *used = pass;
+        (verts.iter().map(|&q| self.to_screen(origin, q + offset)).collect(), idx.clone())
+    }
+
+    fn fill_polys(&self, painter: &Painter, polys: &[Poly], local: &[Poly], at: (Pos2, Vec2), paint: &Paint, bounds: Rect, alpha: f32) {
         let k = alpha * paint.opacity;
         let solid = matches!(paint.kind, PaintKind::Solid(_));
         if solid {
@@ -131,7 +165,9 @@ impl App {
                 }
             }
         }
-        let (verts, idx) = triangulate(polys);
+        crate::prof::lap("fill: convex check");
+        let (verts, idx) = self.triangulated(painter, local, at.0, at.1);
+        crate::prof::lap("fill: triangulate");
         if idx.is_empty() {
             return;
         }
@@ -175,6 +211,7 @@ impl App {
         }
         mesh.indices = idx;
         painter.add(egui::Shape::mesh(mesh));
+        crate::prof::lap("fill: mesh");
     }
 
     fn stroke_polys(&self, painter: &Painter, polys: &[Poly], s: &Shape, alpha: f32) {
@@ -202,47 +239,143 @@ impl App {
     // cached by what is behind (every layer before this one), the layer, the view scale and the page colour.
     fn draw_backdrop(&self, painter: &Painter, origin: Pos2, s: &Shape, offset: Vec2, sigma: f32, alpha: f32, glass: Option<&crate::model::Effect>) {
         let Some(idx) = self.index_of(s.id) else { return };
-        let order = self.draw_order();
-        let Some(pos) = order.iter().position(|&k| k == idx) else { return };
-        let earlier = &order[..pos];
         let ctx = painter.ctx();
-        let pass = ctx.cumulative_pass_nr();
+        let scene = self.scene(ctx);
+        let Some(&pos) = scene.pos.get(idx) else { return };
+        let earlier = &scene.order[..pos];
         let region = s.aabb().translate(offset).expand(sigma * 3.0 + 2.0 + glass.map_or(0.0, |g| crate::export::glass_reach(g, s.aabb())));
         let want = (self.zoom * ctx.pixels_per_point()).max(0.02);
         let mut scale = 2f32.powf((want.log2() * 2.0).round() / 2.0);
         scale = scale.min(2048.0 / region.width().max(region.height()).max(1.0));
         let (pw, ph) = ((region.width() * scale).ceil().max(1.0) as u32, (region.height() * scale).ceil().max(1.0) as u32);
+        // what shows through is the layers before this one that reach into the blurred area, so only those are in the key
         let key = {
             use std::hash::{Hash, Hasher};
             let mut h = std::collections::hash_map::DefaultHasher::new();
             "backdrop".hash(&mut h);
-            for &k in earlier {
-                serde_json::to_string(&self.shapes[k]).unwrap_or_default().hash(&mut h);
+            for &k in earlier.iter().filter(|&&k| scene.rects[k].intersects(region)) {
+                self.scene_hash(&scene, k).hash(&mut h);
             }
-            serde_json::to_string(s).unwrap_or_default().hash(&mut h);
+            self.scene_hash(&scene, idx).hash(&mut h);
             (offset.x.to_bits(), offset.y.to_bits(), pw, ph, sigma.to_bits()).hash(&mut h);
             self.page_bg().to_array().hash(&mut h);
             h.finish()
         };
+        let tex = self.cached_raster(ctx, key, s.id | 1 << 63, || {
+            let img = self.backdrop_image(ctx, earlier, s, offset, region, sigma, pw, ph, glass);
+            img.map(|i| ctx.load_texture("backdrop", i, egui::TextureOptions::LINEAR))
+        });
+        let Some(tex) = tex else { return };
+        painter.image(tex.id(), self.screen_rect(origin, region), Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE.gamma_multiply(alpha));
+    }
+
+    // the layers in draw order with where they are in the world and what they hash to: made once per egui pass, when something needs
+    // to look at the scene as a whole (a background blur)
+    fn scene(&self, ctx: &egui::Context) -> std::cell::Ref<'_, crate::Scene> {
+        let pass = ctx.cumulative_pass_nr();
+        let fresh = {
+            let sc = self.scene.borrow();
+            sc.built && sc.pass == pass && sc.pos.len() == self.shapes.len()
+        };
+        if !fresh {
+            let order = self.draw_order();
+            let n = self.shapes.len();
+            let (mut pos, mut origin, mut rects) = (vec![0; n], vec![Vec2::ZERO; n], vec![Rect::NOTHING; n]);
+            for (p, &i) in order.iter().enumerate() {
+                let s = &self.shapes[i];
+                pos[i] = p;
+                // parents come before their children in draw order
+                origin[i] = s.parent.and_then(|id| self.index_of(id)).map_or(Vec2::ZERO, |pi| origin[pi] + self.shapes[pi].pos.to_vec2());
+                rects[i] = s.aabb().translate(origin[i]).expand(s.paint_pad() + s.stroke_w);
+            }
+            *self.scene.borrow_mut() = crate::Scene { built: true, pass, order, pos, rects, hashes: vec![Default::default(); n] };
+        }
+        self.scene.borrow()
+    }
+
+    // what layer `i` of the scene hashes to: worked out the first time it is asked for in a pass, and only again when the layer changed
+    fn scene_hash(&self, scene: &crate::Scene, i: usize) -> u64 {
+        if scene.hashes[i].get() != 0 {
+            return scene.hashes[i].get();
+        }
+        let s = &self.shapes[i];
+        let mut memo = self.scene_memo.borrow_mut();
+        if memo.len() > 2 * self.shapes.len() + 64 {
+            memo.clear();
+        }
+        let h = match memo.get(&s.id) {
+            Some((was, h)) if was == s => *h,
+            _ => {
+                use std::hash::{Hash, Hasher};
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                serde_json::to_string(s).unwrap_or_default().hash(&mut h);
+                let h = h.finish().max(1);
+                memo.insert(s.id, (s.clone(), h));
+                h
+            }
+        };
+        scene.hashes[i].set(h);
+        h
+    }
+
+    // the texture for `key`, from the cache or made by `make`. While the zoom is still changing, or when this frame has already spent
+    // its time on new rasters, the layer's previous picture (kept under `slot`) is shown instead and the new one is made later.
+    fn cached_raster(&self, ctx: &egui::Context, key: u64, slot: u64, make: impl FnOnce() -> Option<egui::TextureHandle>) -> Option<egui::TextureHandle> {
+        let pass = ctx.cumulative_pass_nr();
         let tex = {
             let mut cache = self.sprites.borrow_mut();
+            if cache.len() > 160 {
+                cache.retain(|_, (_, used)| pass.saturating_sub(*used) < 4);
+            }
             match cache.get_mut(&key) {
                 Some((t, used)) => {
                     *used = pass;
                     Some(t.clone())
                 }
                 None => {
-                    let img = self.backdrop_image(ctx, earlier, s, offset, region, sigma, pw, ph, glass);
-                    let t = img.map(|i| ctx.load_texture("backdrop", i, egui::TextureOptions::LINEAR));
-                    if let Some(t) = &t {
-                        cache.insert(key, (t.clone(), pass));
+                    let spent = match self.raster_budget.get() {
+                        (p, s) if p == pass => s,
+                        _ => 0.0,
+                    };
+                    // while the zoom is still changing nothing is made again: the old picture stays until the zoom has been still
+                    let now = ctx.input(|i| i.time);
+                    let since = match self.zoom_seen.get() {
+                        (z, t) if z == self.zoom => t,
+                        _ => {
+                            self.zoom_seen.set((self.zoom, now));
+                            now
+                        }
+                    };
+                    let zooming = now - since < 0.25;
+                    let stale = self.sprite_last.borrow().get(&slot).map(|(t, _)| t.clone());
+                    if zooming || spent > 0.008 {
+                        // (no picture yet: it shows up when its turn comes, a few frames on, instead of the whole page waiting for it)
+                        if zooming {
+                            ctx.request_repaint_after(std::time::Duration::from_millis(260));
+                        } else {
+                            ctx.request_repaint();
+                        }
+                        stale
+                    } else {
+                        let started = std::time::Instant::now();
+                        let t = make();
+                        self.raster_budget.set((pass, spent + started.elapsed().as_secs_f64()));
+                        if let Some(t) = &t {
+                            cache.insert(key, (t.clone(), pass));
+                        }
+                        t
                     }
-                    t
                 }
             }
         };
-        let Some(tex) = tex else { return };
-        painter.image(tex.id(), self.screen_rect(origin, region), Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE.gamma_multiply(alpha));
+        if let Some(t) = &tex {
+            let mut last = self.sprite_last.borrow_mut();
+            if last.len() > 600 {
+                last.retain(|_, (_, used)| pass.saturating_sub(*used) < 60);
+            }
+            last.insert(slot, (t.clone(), pass));
+        }
+        tex
     }
 
     // a layer that needs more than the mesh painter (effects, aligned or capped strokes, richer paints, images) is drawn from
@@ -259,43 +392,58 @@ impl App {
         local.name.clear();
         local.link = None;
         local.tracks.clear();
+        crate::prof::lap("sprite: clone");
         let region = local.aabb().expand(local.paint_pad() + 2.0);
+        crate::prof::lap("sprite: aabb+pad");
         // raster resolution: the zoom in half-octave steps, never beyond 4096 px
         let want = (self.zoom * ctx.pixels_per_point()).max(0.02);
         let mut scale = 2f32.powf((want.log2() * 2.0).round() / 2.0);
         scale = scale.min(4096.0 / region.width().max(region.height()).max(1.0));
         let (pw, ph) = ((region.width() * scale).ceil().max(1.0) as u32, (region.height() * scale).ceil().max(1.0) as u32);
-        let key = {
-            use std::hash::{Hash, Hasher};
+        use std::hash::{Hash, Hasher};
+        let hash_of = |json: String| {
             let mut h = std::collections::hash_map::DefaultHasher::new();
-            serde_json::to_string(&local).unwrap_or_default().hash(&mut h);
-            serde_json::to_string(&self.styles).unwrap_or_default().hash(&mut h);
-            (pw, ph).hash(&mut h);
+            json.hash(&mut h);
             h.finish()
         };
-        let tex = {
-            let mut cache = self.sprites.borrow_mut();
-            if cache.len() > 160 {
-                cache.retain(|_, (_, used)| pass.saturating_sub(*used) < 4);
+        // what the look of the layer and of the styles hash to: a layer is only written out again when it changed, the styles once a pass
+        let styles_h = match self.styles_key.get() {
+            (p, h) if p == pass => h,
+            _ => {
+                let h = hash_of(serde_json::to_string(&self.styles).unwrap_or_default());
+                self.styles_key.set((pass, h));
+                h
             }
-            match cache.get_mut(&key) {
-                Some((t, used)) => {
-                    *used = pass;
-                    Some(t.clone())
-                }
-                None => {
-                    let img = self.sprite_image(ctx, &local, region, pw, ph);
-                    let t = img.map(|i| ctx.load_texture("sprite", i, egui::TextureOptions::LINEAR));
-                    if let Some(t) = &t {
-                        cache.insert(key, (t.clone(), pass));
-                    }
-                    t
+        };
+        let shape_h = {
+            let mut memo = self.sprite_keys.borrow_mut();
+            if memo.len() > 4000 {
+                memo.clear();
+            }
+            match memo.get(&s.id) {
+                Some((was, h)) if *was == local => *h,
+                _ => {
+                    let h = hash_of(serde_json::to_string(&local).unwrap_or_default());
+                    memo.insert(s.id, (local.clone(), h));
+                    h
                 }
             }
         };
+        let key = {
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            (shape_h, styles_h, pw, ph).hash(&mut h);
+            h.finish()
+        };
+        crate::prof::lap("sprite: key");
+        let tex = self.cached_raster(ctx, key, s.id, || {
+            let img = self.sprite_image(ctx, &local, region, pw, ph);
+            img.map(|i| ctx.load_texture("sprite", i, egui::TextureOptions::LINEAR))
+        });
+        crate::prof::lap("sprite: cache lookup / raster");
         let Some(tex) = tex else { return };
         let dest = self.screen_rect(origin, region.translate(s.pos.to_vec2() + offset));
         painter.image(tex.id(), dest, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE.gamma_multiply(alpha));
+        crate::prof::lap("sprite: painter.image");
     }
 
     fn draw_grids(&self, painter: &Painter, origin: Pos2, s: &Shape, offset: Vec2) {
@@ -376,7 +524,7 @@ impl App {
         let extra = ((s.size.y - galley.size().y / self.zoom + trim_top + trim_bottom).max(0.0)) * [0.0, 0.5, 1.0][s.valign.min(2) as usize] - trim_top;
         let anchor = s.xf(Pos2::new(x, s.pos.y + extra)) + offset;
         let at = self.to_screen(origin, anchor);
-        if self.spell && s.rot() == 0.0 && s.list == 0 && s.runs.is_empty() && !s.text.is_empty() {
+        if self.spell && self.zoom >= 0.4 && s.rot() == 0.0 && s.list == 0 && s.runs.is_empty() && !s.text.is_empty() {
             squiggles(painter, at, &galley, &s.text);
         }
         if s.custom_underline() {
@@ -401,7 +549,19 @@ impl App {
 
     // draws the children of `parent`; `offset` is the parent's world origin
     pub fn draw_level(&self, painter: &Painter, origin: Pos2, parent: Option<u64>, offset: Vec2, alpha: f32) {
-        let kids: Vec<usize> = (0..self.shapes.len()).filter(|&i| self.shapes[i].parent == parent && self.shapes[i].visible).collect();
+        // the children come from a map made once per egui pass, not from a search of the whole page for every container
+        let kids: Vec<usize> = {
+            let pass = painter.ctx().cumulative_pass_nr();
+            let mut c = self.level_kids.borrow_mut();
+            if c.0 != pass || c.1 != self.shapes.len() {
+                c.2.clear();
+                for (i, s) in self.shapes.iter().enumerate() {
+                    c.2.entry(s.parent).or_default().push(i);
+                }
+                (c.0, c.1) = (pass, self.shapes.len());
+            }
+            c.2.get(&parent).map(|v| v.iter().copied().filter(|&i| self.shapes[i].visible).collect()).unwrap_or_default()
+        };
         let Some(first) = kids.iter().position(|&i| self.shapes[i].mask) else {
             for &i in &kids {
                 self.draw_shape(painter, origin, &self.shapes[i], offset, alpha);
@@ -520,20 +680,30 @@ impl App {
             painter.text(r.left_top() - Vec2::new(0.0, 4.0), Align2::LEFT_BOTTOM, &s.name, FontId::proportional(11.0), green);
             return;
         }
-        // off-screen shapes cost tessellation and text layout every frame: skip them (margin covers strokes, effects, labels)
-        let cullable = match s.kind {
-            Kind::Rect | Kind::Ellipse | Kind::Line | Kind::Polygon | Kind::Star | Kind::Text => true,
-            Kind::Frame => s.clip,
-            Kind::Group | Kind::Path => false,
-        };
-        if cullable {
-            let reach = s.effects.iter().filter(|e| e.visible).map(|e| e.dx.abs().max(e.dy.abs()) + e.blur + e.spread.abs()).fold(0.0, f32::max);
-            let margin = (s.stroke_w + reach + if s.kind == Kind::Text { s.font_size * 2.0 } else { 0.0 }) * self.zoom + 24.0;
-            if !self.screen_rect(origin, s.aabb().translate(offset)).expand(margin).intersects(painter.clip_rect()) {
-                return;
+        // off-screen shapes cost tessellation and text layout every frame: skip them (margin covers strokes, effects, labels), and so
+        // does what is too small to see: under a third of a pixel, text under a pixel high. A group's box hugs its children and a
+        // clipping frame clips them, so those take their children with them; a frame that does not clip still draws what sticks out.
+        let reach = s.effects.iter().filter(|e| e.visible).map(|e| e.dx.abs().max(e.dy.abs()) + e.blur + e.spread.abs()).fold(0.0, f32::max);
+        let margin = (s.stroke_w + reach + if s.kind == Kind::Text { s.font_size * 2.0 } else { 0.0 }) * self.zoom + 24.0;
+        let on_rect = self.screen_rect(origin, s.aabb().translate(offset));
+        let on_screen = on_rect.expand(margin).intersects(painter.clip_rect());
+        let tiny = on_rect.width().max(on_rect.height()) < 0.3 && (s.stroke_w + reach) * self.zoom < 0.5 || (s.kind == Kind::Text && s.font_size * self.zoom < 1.0);
+        let paint_own = on_screen && !tiny;
+        match s.kind {
+            Kind::Frame if !s.clip => {}
+            Kind::Line => {
+                if !on_screen {
+                    return;
+                }
+            }
+            _ => {
+                if !paint_own {
+                    return;
+                }
             }
         }
         let alpha = alpha * s.opacity;
+        crate::prof::lap("draw: cull checks");
         if s.kind == Kind::Text {
             // text keeps a simple copy for its drop shadows
             for e in s.effects.iter().filter(|e| e.visible && e.kind == EffectKind::DropShadow) {
@@ -541,23 +711,30 @@ impl App {
                 self.draw_text(painter, origin, &moved, offset, alpha * e.color.a() as f32 / 255.0);
             }
             self.draw_text(painter, origin, s, offset, alpha);
+            crate::prof::lap("draw: text");
             return;
         }
         // a background blur, or glass (the same blurred backdrop, bent near the edge by its Refraction)
-        if let Some(e) = s.effects.iter().find(|e| e.visible && matches!(e.kind, EffectKind::BackgroundBlur | EffectKind::Glass)).filter(|_| s.has_area()) {
+        if let Some(e) = s.effects.iter().find(|e| e.visible && matches!(e.kind, EffectKind::BackgroundBlur | EffectKind::Glass)).filter(|_| paint_own && s.has_area()) {
+            crate::prof::lap("draw: before backdrop");
             self.draw_backdrop(painter, origin, s, offset, e.blur / 2.0, alpha, (e.kind == EffectKind::Glass).then_some(e));
+            crate::prof::lap("draw: backdrop");
         }
-        if s.needs_sprite() && !self.video_playing(s) {
+        if !paint_own {
+            // a frame that does not clip, off the screen or too small: only what is inside it may still show
+        } else if s.needs_sprite() && !self.video_playing(s) {
             self.draw_sprite(painter, origin, s, offset, alpha);
+            crate::prof::lap("draw: sprites");
         } else if s.kind != Kind::Group {
-            let polys = self.screen_polys(origin, s, offset);
+            let (local, polys) = self.screen_polys(origin, s, offset);
             let bounds = self.screen_rect(origin, s.aabb().translate(offset));
             for f in s.fills.iter().filter(|f| f.visible) {
                 if s.has_area() {
-                    self.fill_polys(painter, &polys, f, bounds, alpha);
+                    self.fill_polys(painter, &polys, &local, (origin, offset), f, bounds, alpha);
                 }
             }
             self.stroke_polys(painter, &polys, s, alpha);
+            crate::prof::lap("draw: fills+strokes");
         }
         if s.kind.is_container() {
             let r = self.screen_rect(origin, if s.rot() == 0.0 { s.rect() } else { s.aabb() }.translate(offset)); // a rotated frame clips to its bounds

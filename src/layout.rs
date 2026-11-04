@@ -1,5 +1,7 @@
 // Automatic geometry: groups hugging their children, constraints, auto layout, text fitting,
 // snapping and scaling.
+use std::collections::HashMap;
+
 use egui::{Painter, Pos2, Rect, Vec2};
 
 use crate::geom::rot_vec;
@@ -97,21 +99,50 @@ impl App {
         changed
     }
 
+    // id -> index, how deep each layer is (its `chain` length) and each parent's children (in Vec order): built once per pass, so a
+    // pass over thousands of layers does not search the whole page for every one of them. Stale once a layer is removed or inserted.
+    fn tree_maps(&self) -> (HashMap<u64, usize>, Vec<usize>, HashMap<u64, Vec<usize>>) {
+        let idx: HashMap<u64, usize> = self.shapes.iter().enumerate().map(|(i, s)| (s.id, i)).collect();
+        let mut depth = vec![0usize; self.shapes.len()];
+        for i in 0..self.shapes.len() {
+            let (mut d, mut at) = (0, Some(i));
+            while let Some(k) = at {
+                if depth[k] > 0 {
+                    d += depth[k];
+                    break;
+                }
+                d += 1;
+                at = self.shapes[k].parent.and_then(|p| idx.get(&p).copied());
+                if d > 1000 {
+                    break; // a loop in the parents: give up on a sensible depth
+                }
+            }
+            depth[i] = d;
+        }
+        let mut kids: HashMap<u64, Vec<usize>> = HashMap::new();
+        for (i, s) in self.shapes.iter().enumerate() {
+            if let Some(p) = s.parent {
+                kids.entry(p).or_default().push(i);
+            }
+        }
+        (idx, depth, kids)
+    }
+
     // keeps every group's box tight around its children (moving the origin if needed, children
     // keep their world position) and drops groups that lost all their children. Deepest first.
     pub fn refit_groups(&mut self) -> bool {
-        let mut groups: Vec<(usize, u64)> = (0..self.shapes.len())
-            .filter(|&i| self.shapes[i].kind == Kind::Group)
-            .map(|i| (self.chain(i).len(), self.shapes[i].id))
-            .collect();
+        let (mut idx, depth, mut kid_map) = self.tree_maps();
+        let mut groups: Vec<(usize, u64)> = (0..self.shapes.len()).filter(|&i| self.shapes[i].kind == Kind::Group).map(|i| (depth[i], self.shapes[i].id)).collect();
         groups.sort_by_key(|&(depth, _)| std::cmp::Reverse(depth));
         let mut changed = false;
         for (_, gid) in groups {
-            let Some(g) = self.index_of(gid) else { continue };
-            let kids: Vec<usize> = (0..self.shapes.len()).filter(|&k| self.shapes[k].parent == Some(gid)).collect();
+            let Some(&g) = idx.get(&gid) else { continue };
+            let kids: Vec<usize> = kid_map.get(&gid).cloned().unwrap_or_default();
             let Some(bb) = kids.iter().map(|&k| self.shapes[k].aabb()).reduce(Rect::union) else {
                 self.shapes.remove(g);
                 changed = true;
+                // the indices after it moved up
+                (idx, _, kid_map) = self.tree_maps();
                 continue;
             };
             let d = bb.min.to_vec2();
@@ -159,14 +190,12 @@ impl App {
 
     // lays out the children of every auto-layout frame, innermost first
     fn run_layouts(&mut self) -> bool {
-        let mut frames: Vec<(usize, u64)> = (0..self.shapes.len())
-            .filter(|&i| self.shapes[i].kind == Kind::Frame && self.shapes[i].layout.is_some())
-            .map(|i| (self.chain(i).len(), self.shapes[i].id))
-            .collect();
+        let (idx, depth, kid_map) = self.tree_maps(); // nothing below inserts or removes a layer
+        let mut frames: Vec<(usize, u64)> = (0..self.shapes.len()).filter(|&i| self.shapes[i].kind == Kind::Frame && self.shapes[i].layout.is_some()).map(|i| (depth[i], self.shapes[i].id)).collect();
         frames.sort_by_key(|&(depth, _)| std::cmp::Reverse(depth));
         let mut changed = false;
         for (_, fid) in frames {
-            let Some(fi) = self.index_of(fid) else { continue };
+            let Some(&fi) = idx.get(&fid) else { continue };
             let Some(mut lay) = self.shapes[fi].layout.clone() else { continue };
             // Include stroke in layout: the part of the frame's own stroke that lies inside counts as padding
             if lay.stroke_in_layout && self.shapes[fi].strokes.iter().any(|p| p.visible) {
@@ -178,7 +207,7 @@ impl App {
                 };
                 lay.pad = lay.pad.map(|p| p + inside);
             }
-            let kids: Vec<usize> = (0..self.shapes.len()).filter(|&k| self.shapes[k].parent == Some(fid) && self.shapes[k].kind != Kind::Line && !self.shapes[k].abs).collect();
+            let kids: Vec<usize> = kid_map.get(&fid).map(|v| v.iter().copied().filter(|&k| self.shapes[k].kind != Kind::Line && !self.shapes[k].abs).collect()).unwrap_or_default();
             if kids.is_empty() {
                 continue;
             }
@@ -224,7 +253,11 @@ impl App {
             let max_cross = if baseline_on {
                 kids.iter().map(|&k| top_base - base_of(&self.shapes[k]) + self.shapes[k].size.y).fold(0.0, f32::max)
             } else {
-                kids.iter().filter(|&&k| !fills(&self.shapes[k]).1).map(|&k| axis_get(self.shapes[k].size, c)).fold(0.0, f32::max)
+                // a hugging frame is as wide as the widest child that doesn't stretch; when every child stretches (a chip's label),
+                // they set the size themselves, as in Figma, instead of all collapsing to nothing
+                let fixed_cross = |only_fixed: bool| kids.iter().filter(|&&k| !only_fixed || !fills(&self.shapes[k]).1).map(|&k| axis_get(self.shapes[k].size, c)).fold(0.0, f32::max);
+                let all_stretch = kids.iter().all(|&k| fills(&self.shapes[k]).1);
+                fixed_cross(!(hug_cross && all_stretch))
             };
             let inner_cross = if hug_cross { max_cross } else { (axis_get(frame_size, c) - pad_cross).max(0.0) };
 
@@ -622,17 +655,35 @@ impl App {
 
     // text boxes that size themselves
     pub fn fit_texts(&mut self, painter: &Painter) {
+        // laying out a text is the costly part, so a layer is only measured again when it changed since it was last fitted, or the
+        // fonts did: the layer as it was left (with its fitted size) is kept, and equal means nothing to do
+        let fonts = (crate::textrun::font_generation(), painter.ctx().pixels_per_point().to_bits());
+        let mut memo = self.fit_memo.borrow_mut();
+        if memo.0 != fonts {
+            memo.0 = fonts;
+            memo.1.clear();
+        }
         let mut upd = vec![];
         for (i, s) in self.shapes.iter().enumerate() {
             if s.kind != Kind::Text || s.fit == TextFit::Fixed {
                 continue;
             }
+            if memo.1.get(&s.id).is_some_and(|was| was == s) {
+                continue;
+            }
             let g = text_galley(painter, s, 1.0, egui::Color32::WHITE, wrap_of(s));
             let want = Vec2::new(if s.fit == TextFit::AutoWidth { g.size().x.ceil() + 1.0 } else { s.size.x }, (g.size().y - s.trim_px().0 - s.trim_px().1).ceil());
+            let mut fitted = s.clone();
             if (want - s.size).abs().max_elem() > 0.5 {
                 upd.push((i, want));
+                fitted.size = want;
             }
+            memo.1.insert(s.id, fitted);
         }
+        if memo.1.len() > 2 * self.shapes.len() + 64 {
+            memo.1.clear(); // layers that are gone
+        }
+        drop(memo);
         for (i, want) in upd {
             self.shapes[i].size = want;
         }

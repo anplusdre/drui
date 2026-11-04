@@ -140,19 +140,24 @@ impl App {
     }
 
     pub fn duplicate(&mut self) {
+        self.duplicate_by(Vec2::splat(10.0));
+    }
+
+    // copies of the selection, `d` away from the originals, selected (Alt+drag makes them in place and drags them)
+    pub(crate) fn duplicate_by(&mut self, d: Vec2) {
         // like Figma, a duplicated main component is an instance of it (a variant of a set is copied as a variant)
         let roots = self.sel_roots();
         let is_main = |a: &App, id: u64| a.index_of(id).is_some_and(|i| a.shapes[i].component && !a.shapes[i].component_set && a.set_of(i).is_none());
         let mains: Vec<u64> = roots.iter().copied().filter(|&id| is_main(self, id)).collect();
         if mains.is_empty() {
             let shapes = self.selection_subtrees();
-            self.insert_copies(shapes, Vec2::splat(10.0));
+            self.insert_copies(shapes, d);
             return;
         }
         let mut out = vec![];
         for id in mains {
             let Some(i) = self.index_of(id) else { continue };
-            let (parent, pos) = (self.shapes[i].parent, self.shapes[i].pos + Vec2::splat(10.0));
+            let (parent, pos) = (self.shapes[i].parent, self.shapes[i].pos + d);
             out.extend(self.instantiate(id, parent, pos));
         }
         let others: Vec<u64> = roots.into_iter().filter(|&id| !is_main(self, id)).collect();
@@ -160,7 +165,7 @@ impl App {
             let keep = std::mem::replace(&mut self.sel, others);
             let shapes = self.selection_subtrees();
             self.sel = keep;
-            self.insert_copies(shapes, Vec2::splat(10.0));
+            self.insert_copies(shapes, d);
             out.extend(self.sel.clone());
         }
         self.sel = out;

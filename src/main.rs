@@ -12,6 +12,8 @@ mod code_layer;
 mod sketchimport;
 mod anim_export;
 mod corner_handles;
+mod prof;
+mod tabs;
 mod profile;
 mod comp_more;
 mod slots;
@@ -34,6 +36,8 @@ mod comp;
 mod connect;
 mod devmode;
 mod export;
+mod agent;
+mod patch_expand;
 mod files;
 mod expr;
 mod fig;
@@ -190,7 +194,6 @@ enum Tab {
 #[derive(Clone, Copy, PartialEq)]
 enum LeftTab {
     Layers,
-    Assets,
     History,
     Comments,
 }
@@ -215,9 +218,24 @@ struct PresentAnim {
     dur: f32,
 }
 
+// the layers in draw order, where each is in the world and what it hashes to, made once per egui pass (render.rs `App::scene`)
+#[derive(Default)]
+struct Scene {
+    built: bool,
+    pass: u64,
+    order: Vec<usize>,   // layer indices, parents before children, back to front
+    pos: Vec<usize>,     // layer index -> its place in `order`
+    rects: Vec<Rect>,    // layer index -> its world bounds with what it paints beyond them
+    hashes: Vec<std::cell::Cell<u64>>, // layer index -> a hash of the layer, 0 until asked for
+}
+
 struct App {
     shapes: Vec<Shape>, // the current page
     pages: Vec<Page>,   // every page; the current one's `shapes` is only refreshed on save / switch
+    folders: Vec<Folder>, // the folders the pages are filed in (`Page::folder`)
+    renaming_folder: Option<u64>,
+    in_canvas: bool,    // the left panel shows the open canvas's layers (false: the list of folders and canvases)
+    assets_open: bool,  // the Assets window
     cur: usize,
     guides: Vec<Guide>, // the current page's
     styles: Vec<ColorStyle>,
@@ -249,6 +267,18 @@ struct App {
     clips: HashMap<u64, video::Clip>,        // videos being played in present mode, cut into frames
     tex: HashMap<u64, egui::TextureHandle>,
     sprites: std::cell::RefCell<HashMap<u64, (egui::TextureHandle, u64)>>, // rasters of layers with effects and the like (render.rs)
+    id_index: std::cell::RefCell<HashMap<u64, usize>>, // layer id -> index in `shapes`, a hint checked on every use (`index_of`)
+    sprite_keys: std::cell::RefCell<HashMap<u64, (Shape, u64)>>, // layer id -> the layer as last seen and what it hashed to (render.rs `draw_sprite`)
+    sprite_last: std::cell::RefCell<HashMap<u64, (egui::TextureHandle, u64)>>, // layer id -> its latest raster, shown while a new one is made
+    raster_budget: std::cell::Cell<(u64, f64)>, // egui pass and the seconds spent on new sprite rasters in it
+    styles_key: std::cell::Cell<(u64, u64)>, // egui pass and the hash of the styles written out in it
+    zoom_seen: std::cell::Cell<(f32, f64)>, // the zoom last drawn and the egui time it changed to it
+    fig_import: Option<figimport::FigImport>, // a .fig being read on another thread (figimport.rs)
+    scene: std::cell::RefCell<Scene>, // the layers in draw order with their world rects and hashes, once per pass (render.rs `scene`)
+    fit_memo: std::cell::RefCell<((usize, u32), HashMap<u64, Shape>)>, // fonts the texts were fitted with, and each text as it was left (layout.rs `fit_texts`)
+    tri_cache: std::cell::RefCell<HashMap<u64, (Vec<Pos2>, Vec<u32>, u64)>>, // an outline -> its triangles and the pass they were last used in (render.rs `triangulated`)
+    scene_memo: std::cell::RefCell<HashMap<u64, (Shape, u64)>>, // layer id -> the layer as last seen and what it hashed to
+    level_kids: std::cell::RefCell<(u64, usize, HashMap<Option<u64>, Vec<usize>>)>, // egui pass, layer count and each parent's children (render.rs `draw_level`)
     sel: Vec<u64>,
     base_sel: Vec<u64>, // selection a shift-marquee adds to
     row_drag: Option<u64>, // layers-panel row being dragged
@@ -277,7 +307,6 @@ struct App {
     sizes: HashMap<u64, Vec2>, // last seen frame sizes, to apply constraints when they change
     scale_orig: Vec<Shape>,    // shapes as they were when a Scale drag began
     snap: bool,
-    rulers: bool,
     snap_lines: Vec<Guide>, // smart guides to draw this frame
     pen: Vec<PathPt>,       // path being drawn, world coordinates
     pencil: Vec<Pos2>,      // freehand stroke being drawn, world coordinates
@@ -331,7 +360,17 @@ struct App {
     paste_n: f32,
     view: Rect, // where the canvas is on screen
     show_help: bool,
+    agent: agent::Agent, // agent mode: chat boxes that edit the design through Claude Code
+    home: bool,     // the home page (recent files) is shown in place of the canvas
     left_min: bool, // the left panel is minimised to a floating bar
+    right_min: bool, // the same for the right panel
+    left_w: f32,    // widths of the floating panels (dragged by their inner edge)
+    right_w: f32,
+    tabs: Vec<Option<tabs::Parked>>, // the open files, one per tab; the open one is `None` (it is in the fields of App), the others are parked
+    open_tab: usize,                 // which of `tabs` is open
+    loaded: u32,                     // counts the documents loaded, so a frame can tell its layers were swapped for another file's
+    ghost: Vec<(u64, f32)>, // Alt+drag: the copies being dragged and the opacity each has to get back when dropped
+    deep_pick: bool, // Ctrl is held: clicks and the hover outline pick the nested layer, not the outermost one
     blend_cache: Option<BlendCache>,
     last_shape: Kind, // the shape tool the toolbar button offers
     shown_status: String, // the toast currently on screen
@@ -409,6 +448,10 @@ impl Default for App {
         Self {
             shapes: vec![],
             pages: vec![Page::default()],
+            folders: vec![],
+            renaming_folder: None,
+            in_canvas: false,
+            assets_open: false,
             cur: 0,
             guides: vec![],
             styles: vec![],
@@ -440,6 +483,18 @@ impl Default for App {
             clips: HashMap::new(),
             tex: HashMap::new(),
             sprites: Default::default(),
+            id_index: Default::default(),
+            sprite_keys: Default::default(),
+            sprite_last: Default::default(),
+            raster_budget: Default::default(),
+            styles_key: Default::default(),
+            zoom_seen: Default::default(),
+            fig_import: None,
+            level_kids: Default::default(),
+            scene: Default::default(),
+            scene_memo: Default::default(),
+            tri_cache: Default::default(),
+            fit_memo: Default::default(),
             sel: vec![],
             base_sel: vec![],
             row_drag: None,
@@ -468,7 +523,6 @@ impl Default for App {
             sizes: HashMap::new(),
             scale_orig: vec![],
             snap: true,
-            rulers: true,
             snap_lines: vec![],
             pen: vec![],
             pencil: vec![],
@@ -522,7 +576,17 @@ impl Default for App {
             paste_n: 0.0,
             view: Rect::from_min_size(Pos2::ZERO, Vec2::new(900.0, 600.0)),
             show_help: false,
+            agent: agent::Agent::default(),
+            home: false,
             left_min: false,
+            right_min: false,
+            left_w: 300.0,
+            right_w: 300.0,
+            tabs: vec![None],
+            open_tab: 0,
+            loaded: 0,
+            ghost: vec![],
+            deep_pick: false,
             blend_cache: None,
             last_shape: Kind::Rect,
             shown_status: String::new(),
@@ -612,8 +676,19 @@ impl App {
         Rect::from_min_max(self.to_screen(origin, r.min), self.to_screen(origin, r.max))
     }
 
+    // where layer `id` is in `shapes`. The map is only a hint: a hit is checked against the layer itself, so edits that move, insert or
+    // remove layers can never make it answer wrongly; it is rebuilt when a layer is found that it did not know where to find.
     fn index_of(&self, id: u64) -> Option<usize> {
-        self.shapes.iter().position(|s| s.id == id)
+        if let Some(&i) = self.id_index.borrow().get(&id) {
+            if self.shapes.get(i).is_some_and(|s| s.id == id) {
+                return Some(i);
+            }
+        }
+        let found = self.shapes.iter().position(|s| s.id == id)?;
+        let mut map = self.id_index.borrow_mut();
+        map.clear();
+        map.extend(self.shapes.iter().enumerate().rev().map(|(i, s)| (s.id, i))); // the first of two equal ids wins, as `position` would
+        Some(found)
     }
 
     // the selected shape, when exactly one is selected
@@ -675,19 +750,23 @@ impl App {
 
     // depth-first, parents before children, siblings in z-order: last = topmost
     fn draw_order(&self) -> Vec<usize> {
-        fn walk(app: &App, parent: Option<u64>, out: &mut Vec<usize>) {
-            let mut kids: Vec<usize> = (0..app.shapes.len()).filter(|&i| app.shapes[i].parent == parent).collect();
+        fn walk(app: &App, by_parent: &HashMap<Option<u64>, Vec<usize>>, parent: Option<u64>, out: &mut Vec<usize>) {
+            let mut kids: Vec<usize> = by_parent.get(&parent).cloned().unwrap_or_default();
             // canvas stacking: an auto-layout frame can draw its first child on top
             if parent.and_then(|p| app.index_of(p)).is_some_and(|p| app.shapes[p].layout.as_ref().is_some_and(|l| l.first_on_top)) {
                 kids.reverse();
             }
             for i in kids {
                 out.push(i);
-                walk(app, Some(app.shapes[i].id), out);
+                walk(app, by_parent, Some(app.shapes[i].id), out);
             }
         }
+        let mut by_parent: HashMap<Option<u64>, Vec<usize>> = HashMap::new();
+        for (i, s) in self.shapes.iter().enumerate() {
+            by_parent.entry(s.parent).or_default().push(i);
+        }
         let mut out = vec![];
-        walk(self, None, &mut out);
+        walk(self, &by_parent, None, &mut out);
         out
     }
 
@@ -708,23 +787,40 @@ impl App {
     // deepest shape under world point `p`
     fn hit_test(&self, p: Pos2) -> Option<u64> {
         let tol = 4.0 / self.zoom;
-        self.draw_order().into_iter().rev().find_map(|i| {
+        let order = self.draw_order();
+        // where each layer's own position is measured from, parents first (the order puts them before their children)
+        let mut origin = vec![Vec2::ZERO; self.shapes.len()];
+        for &i in &order {
+            origin[i] = self.shapes[i].parent.and_then(|id| self.index_of(id)).map_or(Vec2::ZERO, |pi| origin[pi] + self.shapes[pi].pos.to_vec2());
+        }
+        order.into_iter().rev().find_map(|i| {
             let s = &self.shapes[i];
             let hit = if s.kind == Kind::Frame && s.parent.is_none() {
                 self.title_rect(s).contains(p)
             } else {
-                s.hit(p - self.origin_of(s.parent), tol)
+                // most layers are nowhere near the pointer: the box (with the stroke and the pick tolerance) says so cheaply
+                s.aabb().translate(origin[i]).expand(tol + s.stroke_w).contains(p) && s.hit(p - origin[i], tol)
             };
             (hit && !s.mask && self.reachable(i, p)).then_some(s.id)
         })
     }
 
-    // what a click on `id` selects: the outermost group around it (clicks pick groups, double-click picks inside)
+    // what a click on `id` selects: the outermost layer below the top-level frame (a group, or a frame inside a frame), or what is
+    // already selected around it; double-click and Ctrl reach the nested layer itself
     fn select_unit(&self, id: u64) -> u64 {
         let Some(i) = self.index_of(id) else { return id };
+        if self.deep_pick {
+            return id;
+        }
+        let chain = self.chain(i);
         let mut best = id;
-        for &k in &self.chain(i)[1..] {
-            if self.shapes[k].kind != Kind::Group {
+        for &k in &chain {
+            if self.sel.contains(&self.shapes[k].id) {
+                return self.shapes[k].id;
+            }
+        }
+        for &k in &chain[1..] {
+            if self.shapes[k].kind == Kind::Frame && self.shapes[k].parent.is_none() {
                 break;
             }
             best = self.shapes[k].id;
@@ -991,6 +1087,7 @@ impl App {
         }
         Doc {
             pages: self.pages.clone(),
+            folders: self.folders.clone(),
             current: self.cur,
             styles: self.styles.clone(),
             ext_styles: self.ext.clone(),
@@ -1042,8 +1139,9 @@ impl App {
         self.open_doc(doc, path);
     }
 
-    // makes `doc` the open document: the file path it came from (or will be saved to) is `path`
-    pub(crate) fn open_doc(&mut self, mut doc: Doc, path: PathBuf) {
+    // makes `doc` the open document in place of the current one: the file path it came from (or will be saved to) is `path`
+    pub(crate) fn load_doc(&mut self, mut doc: Doc, path: PathBuf) {
+        self.loaded += 1;
         if doc.pages.is_empty() {
             doc.pages.push(Page::default());
         }
@@ -1066,6 +1164,9 @@ impl App {
         self.shapes = doc.pages[self.cur].shapes.clone();
         self.guides = doc.pages[self.cur].guides.clone();
         self.pages = doc.pages;
+        self.folders = doc.folders;
+        self.renaming_folder = None;
+        self.in_canvas = false;
         self.styles = doc.styles;
         self.ext = doc.ext_styles;
         self.variables = doc.variables;
@@ -1085,6 +1186,7 @@ impl App {
         self.clips.clear();
         self.tex.clear();
         self.reset_session();
+        self.home = false;
         self.status = format!("loaded {}", path.display());
         if !cfg!(test) {
             files::note_recent(&path);
@@ -1133,11 +1235,20 @@ impl App {
 
     // moves page `from` to the slot `to` (0..=len, counted before the move); the open page and the comments follow their pages
     fn move_page(&mut self, from: usize, to: usize) {
-        if from >= self.pages.len() || to > self.pages.len() || to == from || to == from + 1 {
+        if let Some(folder) = self.pages.get(from).map(|p| p.folder) {
+            self.move_page_into(from, to, folder);
+        }
+    }
+
+    // the same, and the page is filed in `folder` (0: no folder); a drop on the slot it already has still counts if the folder changes
+    fn move_page_into(&mut self, from: usize, to: usize, folder: u64) {
+        let in_place = to == from || to == from + 1;
+        if from >= self.pages.len() || to > self.pages.len() || (in_place && self.pages[from].folder == folder) {
             return;
         }
         self.record_pages_undo();
         self.store_current_page();
+        self.pages[from].folder = folder;
         let page = self.pages.remove(from);
         let ins = if to > from { to - 1 } else { to };
         self.pages.insert(ins, page);
@@ -1195,8 +1306,29 @@ impl App {
     fn add_page(&mut self) {
         self.record_pages_undo();
         let n = self.pages.len() + 1;
-        self.pages.push(Page { name: format!("Page {n}"), ..Page::default() });
+        // a new canvas goes into the folder of the open one
+        let folder = self.pages[self.cur].folder;
+        self.pages.push(Page { name: format!("Canvas {n}"), folder, ..Page::default() });
         self.switch_page(n - 1);
+    }
+
+    // a new, empty folder at the end of the folder list, its name open for editing
+    fn add_folder(&mut self) {
+        let id = self.new_id();
+        let name = format!("Folder {}", self.folders.len() + 1);
+        self.folders.push(Folder { id, name, collapsed: false });
+        self.renaming_folder = Some(id);
+    }
+
+    // the canvases in the folder move out to the top level
+    fn delete_folder(&mut self, id: u64) {
+        if self.pages.iter().any(|p| p.folder == id) {
+            self.record_pages_undo();
+        }
+        for p in self.pages.iter_mut().filter(|p| p.folder == id) {
+            p.folder = 0;
+        }
+        self.folders.retain(|f| f.id != id);
     }
 
     fn delete_page(&mut self, i: usize) {
@@ -1293,15 +1425,12 @@ impl App {
         }
     }
 
-    // zoom, rulers and help: fine in every mode
+    // zoom and help: fine in every mode
     fn view_keys(&mut self, ctx: &egui::Context) {
         let cmd = Modifiers::COMMAND;
         let key = |m: Modifiers, k: Key| ctx.input_mut(|i| i.consume_key(m, k));
         if ctx.input(|i| i.key_pressed(Key::Questionmark)) {
             self.show_help ^= true;
-        }
-        if key(Modifiers::SHIFT, Key::R) {
-            self.rulers ^= true;
         }
         if key(Modifiers::SHIFT, Key::G) {
             self.layout_guides ^= true;
@@ -1314,6 +1443,9 @@ impl App {
         }
         if key(Modifiers::SHIFT, Key::Backslash) {
             self.left_min ^= true;
+        }
+        if key(Modifiers::ALT, Key::Backslash) {
+            self.right_min ^= true;
         }
         // text shortcuts (not while typing): size, weight, letter spacing, line height
         if self.editing_text.is_none() {
@@ -1741,13 +1873,35 @@ impl App {
             egui::CentralPanel::default().frame(egui::Frame::NONE.fill(BG_MENU())).show(ui, |ui| self.gallery(ui));
             return;
         }
-        let before = self.shapes.clone(); // before keyboard edits too, so they are undoable
+        prof::start();
+        // a frame of only pointer moves, the wheel and zoom changes nothing in the document: no snapshot to compare with, and no second
+        // settle (what is allowed here is a list of what cannot edit: anything else is not quiet)
+        let quiet = !cfg!(feature = "pro")
+            && self.pending.is_none()
+            && matches!(self.drag, Drag::None)
+            && self.api.is_none()
+            && self.editing_text.is_none()
+            && self.fig_import.is_none()
+            && self.present.is_none()
+            && self.mode != Mode::Motion
+            && ctx.input(|i| {
+                !i.pointer.any_down()
+                    && i.keys_down.is_empty()
+                    && i.raw.dropped_files.is_empty()
+                    && i.events.iter().all(|e| matches!(e, egui::Event::PointerMoved(_) | egui::Event::MouseWheel { .. } | egui::Event::Zoom(_) | egui::Event::PointerGone | egui::Event::WindowFocused(_)))
+            });
+        let loaded = self.loaded;
+        let before = if quiet { Vec::new() } else { self.shapes.clone() }; // before keyboard edits too, so they are undoable
         let before_sel = self.sel.clone();
         let before_rest = self.snap_rest();
         let before_page = self.cur;
+        prof::lap("frame: snapshot clone");
         self.handle_events(&ctx);
-        self.shortcuts(&ctx);
+        if !self.agent.busy() {
+            self.shortcuts(&ctx);
+        }
         self.poll_api(&ctx);
+        self.fig_import_tick(&ctx);
         // an undo or redo just replaced the shapes: that is not a new edit
         let undid = std::mem::take(&mut self.undid);
         let before = if undid { self.shapes.clone() } else { before };
@@ -1761,8 +1915,9 @@ impl App {
             }
         }
         let shown = if motion { self.motion_begin() } else { None };
+        prof::lap("frame: events, shortcuts, api");
 
-        // the color picker's "On this page" swatches: the page's solid colors, first use first
+        // the color picker's "On this canvas" swatches: the canvas's solid colors, first use first
         let mut colors: Vec<Color32> = vec![];
         for p in self.shapes.iter().flat_map(|s| s.fills.iter().chain(s.strokes.iter())) {
             if let PaintKind::Solid(c) = p.kind {
@@ -1773,46 +1928,69 @@ impl App {
             }
         }
         ctx.data_mut(|d| d.insert_temp(picker::page_colors_id(), colors));
+        prof::lap("frame: page colours scan");
         let chrome = (self.present.is_none() || self.present_inline) && !self.hide_ui;
         if chrome {
-            // Figma: a 58px rail and 240px panels on #2c2c2c, 1px #444 between them
-            let bare = egui::Frame::NONE.fill(BG());
-            egui::Panel::left("rail").resizable(false).exact_size(58.0).frame(bare).show(ui, |ui| self.rail(ui));
-            if !self.left_min {
-                egui::Panel::left("layers").resizable(true).default_size(240.0).size_range(240.0..=480.0).frame(bare).show(ui, |ui| self.left_panel(ui));
+            // the left and right panels float over the canvas (`floating_panels`); the menu header sits under the tab bar
+            self.tab_bar_panel(ui);
+            if !self.home && !self.agent.on {
+                self.menu_header_panel(ui);
             }
-            egui::Panel::right("props").resizable(true).default_size(240.0).size_range(240.0..=480.0).frame(bare).show(ui, |ui| self.right_panel(ui));
-            if self.mode == Mode::Motion {
+            if self.mode == Mode::Motion && !self.agent.on {
                 egui::Panel::bottom("timeline").resizable(true).default_size(170.0).size_range(90.0..=420.0).show(ui, |ui| self.timeline(ui));
             }
         }
-        let canvas = egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| self.canvas(ui)).response.rect;
+        prof::lap("frame: panels");
+        let canvas = egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| if self.home { self.home_page(ui) } else { self.canvas(ui) }).response.rect;
+        prof::lap("frame: canvas panel (rest)");
         fig::set_labels(self.prop_labels);
         if chrome {
-            self.toolbar(&ctx);
             self.actions_palette(&ctx);
             self.quick_palette(&ctx);
-            if self.left_min {
-                self.left_pill(&ctx, canvas);
+            if !self.home {
+                if !self.agent.on {
+                    self.toolbar(&ctx);
+                }
+                if !self.agent.on {
+                    self.floating_panels(&ctx, canvas);
+                }
+                self.agent_ui(&ctx, canvas);
             }
         }
         self.variables_window(&ctx);
+        self.assets_window(&ctx);
         self.suggestions_window(&ctx);
         self.branches_window(&ctx);
         self.files_window(&ctx);
+        self.fig_import_overlay(&ctx);
+        prof::lap("frame: toolbar, windows");
+        // a layer picked in this frame (on the canvas, in a menu) shows the layers of its canvas in the left panel
+        if !self.sel.is_empty() && self.sel != before_sel {
+            self.in_canvas = true;
+        }
+        // a file was opened or a tab picked in this frame: its layers are not an edit of the previous ones
+        let swapped = self.loaded != loaded;
+        let before = if swapped { self.shapes.clone() } else { before };
+        let (before_sel, before_rest) = if swapped { (self.sel.clone(), self.snap_rest()) } else { (before_sel, before_rest) };
+        let shown = shown.filter(|_| !swapped);
         if !ctx.input(|i| i.pointer.any_down()) {
             self.row_drag = None;
         }
         if let Some(shown) = shown {
             self.motion_end(&before, &shown);
         }
-        self.settle();
-        if self.shapes != before {
+        if !quiet {
+            self.settle();
+        }
+        prof::lap("frame: settle");
+        if !quiet && self.shapes != before {
+            prof::lap("frame: compare shapes");
             self.sync_instances(&before);
             self.sync_variant_edit(&before);
             self.settle();
             ctx.request_repaint();
         }
+        prof::lap("frame: compare (and sync when changed)");
         let remote = false;
         let before = if remote { self.shapes.clone() } else { before };
         let before_rest = if remote { self.snap_rest() } else { before_rest };
@@ -1821,7 +1999,7 @@ impl App {
         // commit it when the pointer is released
         // ponytail: full-document snapshots, switch to diffs if documents get large
         // (a change of page is not an edit of either page: moving between pages, and page add / delete, record their own steps)
-        if self.pending.is_none() && self.cur == before_page && (self.shapes != before || self.snap_rest() != before_rest) {
+        if !quiet && self.pending.is_none() && self.cur == before_page && (self.shapes != before || self.snap_rest() != before_rest) {
             let Snap { guides, styles, ext, variables, comments, page, page_look, .. } = before_rest;
             self.pending = Some(Snap { shapes: before, sel: before_sel, guides, styles, ext, variables, comments, page, page_look, pages: None });
         }
@@ -1831,6 +2009,7 @@ impl App {
                 self.redo.clear();
             }
         }
+        prof::lap("frame: undo bookkeeping");
     }
 }
 
@@ -1884,8 +2063,8 @@ fn main() -> eframe::Result {
                 }
             }
             if let Some(t) = flag("--left") {
+                app.assets_open = t == "assets";
                 app.left_tab = match t.as_str() {
-                    "assets" => LeftTab::Assets,
                     "history" => LeftTab::History,
                     "comments" => LeftTab::Comments,
                     _ => LeftTab::Layers,

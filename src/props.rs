@@ -1893,22 +1893,22 @@ fn inline_menu<T: PartialEq + Copy>(ui: &mut egui::Ui, r: Rect, cur: &mut T, ite
     // nothing selected: the page background and the color styles
     pub(crate) fn page_props(&mut self, ui: &mut egui::Ui, act: &mut Option<Act>) {
         let g = Grid::of(ui.max_rect());
-        fig::header(ui, "Page", false, &[]);
+        fig::header(ui, "Canvas", false, &[]);
         let r = fig::controls(ui, 4.0);
         let f = g.col1(r);
         fig::input_bg(ui, f, false);
         let cur = self.cur;
         let page = &mut self.pages[cur];
         let bg = &mut page.background;
-        fig::swatch(ui, Pos2::new(f.left() + 12.0, r.center().y), bg, "Page background");
+        fig::swatch(ui, Pos2::new(f.left() + 12.0, r.center().y), bg, "Canvas background");
         fig::hex_text(ui, Pos2::new(f.left() + 24.0, r.center().y), f.width() - 28.0, bg, ui.id().with("page-hex"));
         // the page's opacity is its colour's alpha (egui keeps colours premultiplied, so go through the straight form)
         let [pr, pg, pb, pa] = bg.to_srgba_unmultiplied();
         let mut pct = pa as f32 / 255.0 * 100.0;
-        if fig::num_field(ui, g.col2(r), ui.id().with("page-opacity"), Prefix::Icon(Glyph::Contrast), &mut pct, Num { min: 0.0, max: 100.0, decimals: 0, suffix: "%", speed: 1.0 }, "Page opacity") {
+        if fig::num_field(ui, g.col2(r), ui.id().with("page-opacity"), Prefix::Icon(Glyph::Contrast), &mut pct, Num { min: 0.0, max: 100.0, decimals: 0, suffix: "%", speed: 1.0 }, "Canvas opacity") {
             *bg = Color32::from_rgba_unmultiplied(pr, pg, pb, (pct / 100.0 * 255.0).round() as u8);
         }
-        if fig::icon_button(ui, g.icon(r), if page.bg_visible { Glyph::Eye } else { Glyph::EyeOff }, "Toggle page background", !page.bg_visible).clicked() {
+        if fig::icon_button(ui, g.icon(r), if page.bg_visible { Glyph::Eye } else { Glyph::EyeOff }, "Toggle canvas background", !page.bg_visible).clicked() {
             page.bg_visible ^= true;
         }
         fig::end(ui);
@@ -2392,7 +2392,7 @@ fn family_picker(ui: &mut egui::Ui, r: Rect, s: &mut Shape) {
         let field = Rect::from_min_max(Pos2::new(sr.left() + 8.0, sr.top()), Pos2::new(sr.right() - 8.0, sr.bottom()));
         fig::input_bg(ui, field, false);
         paint_glyph_sized(ui.painter(), Pos2::new(field.left() + 14.0, field.center().y), Glyph::Search, TEXT_SECONDARY(), 13.0);
-        let edit = fig::text_edit(ui, field.with_min_x(field.left() + 26.0), &mut q, "Search fonts", "Search fonts");
+        let edit = fig::text_edit_in(ui, field.with_min_x(field.left() + 26.0), Some(field), &mut q, "Search fonts", "Search fonts");
         if !edit.has_focus() && !ui.data(|d| d.get_temp::<bool>(search_id.with("focused")).unwrap_or(false)) {
             edit.request_focus();
             ui.data_mut(|d| d.insert_temp(search_id.with("focused"), true));

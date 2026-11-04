@@ -1854,12 +1854,23 @@ pub struct Guide {
     pub pos: f32,
 }
 
+// a folder in the Canvas list of the left panel: it holds canvases (pages) through `Page::folder`; making, renaming and deleting
+// one is not an undo step (deleting only moves its canvases out)
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Folder {
+    pub id: u64,
+    pub name: String,
+    pub collapsed: bool,
+}
+
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Page {
     pub name: String,
     pub shapes: Vec<Shape>,
     pub guides: Vec<Guide>,
+    pub folder: u64, // the `Folder` the canvas sits in (0: none, or a folder that is gone)
     pub background: Color32, // its alpha is the page's opacity (Page > opacity)
     pub bg_visible: bool,    // the eye in the Page section: off shows no page colour at all
     pub anim_ms: f32, // length of the Motion timeline
@@ -1895,7 +1906,7 @@ pub struct AudioClip {
 
 impl Default for Page {
     fn default() -> Self {
-        Self { name: "Page 1".into(), shapes: vec![], guides: vec![], background: crate::theme::SUNKEN(), bg_visible: true, anim_ms: 2000.0, anim_loop: true, proto_device: Device::None, proto_bg: Color32::BLACK, proto_scale: 0, audio: vec![], annotations: vec![], measures: vec![] }
+        Self { name: "Canvas 1".into(), shapes: vec![], guides: vec![], folder: 0, background: crate::theme::SUNKEN(), bg_visible: true, anim_ms: 2000.0, anim_loop: true, proto_device: Device::None, proto_bg: Color32::BLACK, proto_scale: 0, audio: vec![], annotations: vec![], measures: vec![] }
     }
 }
 
@@ -1990,6 +2001,7 @@ pub struct Asset {
 #[serde(default)]
 pub struct Doc {
     pub pages: Vec<Page>,
+    pub folders: Vec<Folder>,
     pub current: usize,
     pub styles: Vec<ColorStyle>,
     pub ext_styles: ExtStyles,

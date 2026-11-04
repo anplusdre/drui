@@ -28,6 +28,9 @@ pub fn SELECTED_INK() -> Color32 {
     crate::theme::SELECTED_FG() // icon on SELECTED(), active constraint, links
 }
 pub const SHARE: Color32 = Color32::from_rgb(0x0c, 0x8c, 0xe9);
+// agent mode: the colored border round the canvas, its button, its markers and the send button (Claude's coral)
+pub const AGENT: Color32 = Color32::from_rgb(0xd9, 0x77, 0x57);
+pub const AGENT_INK: Color32 = Color32::WHITE; // text and icons on a solid AGENT fill
 pub const COMPONENT_INK: Color32 = Color32::from_rgb(0xd1, 0xa8, 0xff);
 // Figma's main menu and its submenus (measured 2026-10-18, CSS px): #1e1e1e, no border, 8px padding all round, rows 24px
 // tall on a #0c8ce9 highlight inset 8px, label 8px inside the highlight, a 17px gap (8, a 1px #353535 line, 8) between groups
@@ -39,7 +42,11 @@ pub fn MENU_BG() -> Color32 {
 pub fn MENU_RULE() -> Color32 {
     crate::theme::MENU_LINE()
 }
-pub const MENU_HOT: Color32 = SHARE;
+// the highlighted row of any menu (hovered, or the current choice): white with black text, no blue and no check mark; the rows of a plain menu sit
+// MENU_INSET in from the card's edges
+pub const MENU_HOT: Color32 = Color32::WHITE;
+pub const MENU_HOT_INK: Color32 = Color32::BLACK;
+pub const MENU_INSET: f32 = 6.0;
 pub const MENU_PAD: i8 = 8;
 pub const MENU_GROUP_GAP: f32 = 17.0;
 
@@ -323,7 +330,7 @@ pub fn num_field(ui: &mut egui::Ui, r: Rect, id: egui::Id, prefix: Prefix, v: &m
             r.left() + 24.0
         }
     };
-    let value_rect = Rect::from_min_max(Pos2::new(value_x - 1.0, r.top()), Pos2::new(r.right() - 4.0, r.bottom()));
+    let value_rect = Rect::from_min_max(Pos2::new(value_x, r.top()), Pos2::new(r.right() - 4.0, r.bottom()));
     match editing {
         Some(mut text) => {
             let edit_id = id.with("edit");
@@ -331,6 +338,7 @@ pub fn num_field(ui: &mut egui::Ui, r: Rect, id: egui::Id, prefix: Prefix, v: &m
             if !out.has_focus() && !out.lost_focus() {
                 out.request_focus();
             }
+            focus_ring(ui, r);
             let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
             let esc = ui.input(|i| i.key_pressed(egui::Key::Escape));
             if out.lost_focus() || enter || esc {
@@ -554,7 +562,7 @@ pub fn parse_hex(text: &str) -> Option<u32> {
 }
 
 pub fn hex_text(ui: &mut egui::Ui, pos: Pos2, width: f32, c: &mut Color32, id: egui::Id) -> bool {
-    let r = Rect::from_min_size(Pos2::new(pos.x - 1.0, pos.y - 10.0), Vec2::new(width, 20.0));
+    let r = Rect::from_min_size(Pos2::new(pos.x, pos.y - 10.0), Vec2::new(width, 20.0));
     let editing: Option<String> = ui.data(|d| d.get_temp(id));
     match editing {
         Some(mut text) => {
@@ -676,6 +684,18 @@ pub fn text_input(ui: &mut egui::Ui, r: Rect, text: &mut String, name: &str, hin
 // the editable text of a field whose background is already painted: it fills the whole box (so a click
 // anywhere in it edits) with the text centred vertically
 pub fn text_edit(ui: &mut egui::Ui, r: Rect, text: &mut String, name: &str, hint: &str) -> Response {
+    text_edit_in(ui, r, Some(r), text, name, hint)
+}
+
+// a focused field: a 1px accent border inside its box and a 3px outline of the accent at 8% around it
+pub fn focus_ring(ui: &egui::Ui, r: Rect) {
+    ui.painter().rect_stroke(r, RADIUS, Stroke::new(3.0, crate::BRAND.gamma_multiply(0.08)), egui::StrokeKind::Outside);
+    ui.painter().rect_stroke(r, RADIUS, Stroke::new(1.0, crate::BRAND), egui::StrokeKind::Inside);
+}
+
+// `text_edit` whose focus ring goes round `ring` (the whole field when `r` is only its text part, such as a search field with an
+// icon) or nowhere (`None`, for fields that draw their own focus look)
+pub fn text_edit_in(ui: &mut egui::Ui, r: Rect, ring: Option<Rect>, text: &mut String, name: &str, hint: &str) -> Response {
     let inner = Rect::from_min_max(Pos2::new(r.left() + 6.0, r.top()), Pos2::new(r.right() - 4.0, r.bottom()));
     let mut resp = put(ui, inner, egui::TextEdit::singleline(text).frame(egui::Frame::NONE).font(reg(11.0)).hint_text(hint).margin(egui::Margin::symmetric(2, 0)).vertical_align(egui::Align::Center).min_size(inner.size()));
     let set = ui.input(|i| {
@@ -689,6 +709,9 @@ pub fn text_edit(ui: &mut egui::Ui, r: Rect, text: &mut String, name: &str, hint
         resp.mark_changed();
     }
     resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::TextEdit, true, name));
+    if let Some(ring) = ring.filter(|_| resp.has_focus()) {
+        focus_ring(ui, ring);
+    }
     resp
 }
 

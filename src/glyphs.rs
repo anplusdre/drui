@@ -1,7 +1,7 @@
 // Small painted glyphs for action buttons (egui's default font lacks most symbols), plus tiny widgets that use them.
 use egui::{Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, StrokeKind, Vec2};
 
-use crate::{BG, BG_PRESSED, BRAND, R_SMALL, TEXT, TEXT_SECONDARY, TEXT_TERTIARY};
+use crate::{BG, BG_PRESSED, R_SMALL, TEXT, TEXT_SECONDARY, TEXT_TERTIARY};
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum Glyph {
@@ -58,6 +58,10 @@ pub enum Glyph {
     ImagePlus,
     Library,
     Clock,
+    Home,
+    ChevronLeft,
+    Folder,
+    FolderPlus,
     MessageSquare,
     Search,
     File,
@@ -191,6 +195,10 @@ pub fn svg_of(g: Glyph) -> Option<(&'static str, &'static str)> {
         ImagePlus => svg!("image-plus"),
         Library => svg!("library"),
         Clock => svg!("clock"),
+        Home => svg!("house"),
+        ChevronLeft => svg!("chevron-left"),
+        Folder => svg!("folder"),
+        FolderPlus => svg!("folder-plus"),
         MessageSquare => svg!("message-square"),
         Search => svg!("search"),
         File => svg!("file"),
@@ -551,18 +559,20 @@ fn menu_row_resp(ui: &mut egui::Ui, g: Option<Glyph>, check: Option<bool>, label
     let icons = inset && ui.spacing().icon_width > 0.0;
     let (label_x, right, gap) = if icons { (35.0, 8.0, 20.0) } else if inset { (if check.is_some() { 24.0 } else { 8.0 }, 8.0, 6.0) } else { (LABEL_X, 16.0, 20.0) };
     let short_w = if shortcut.is_empty() { 0.0 } else { gap + ui.fonts_mut(|f| f.layout_no_wrap(shortcut.to_owned(), font.clone(), TEXT()).size().x) };
-    let w = menu_width(ui, label_x + label_w + short_w + if icons { if shortcut.is_empty() { 28.0 } else { 8.0 } } else if inset { 8.0 } else { 16.0 }).max(ui.min_rect().width()).max(row_min(ui));
+    let side = if inset { 0.0 } else { crate::fig::MENU_INSET };
+    let w = menu_width(ui, label_x + label_w + short_w + if icons { if shortcut.is_empty() { 28.0 } else { 8.0 } } else if inset { 8.0 } else { 16.0 } + 2.0 * side).max(ui.min_rect().width()).max(row_min(ui));
     if inset {
         // a popup remembers its last width and a justified layout stretches rows to it, so a menu would never shrink
         ui.set_max_width(w);
     }
-    let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, MENU_ROW), if enabled { Sense::click() } else { Sense::hover() });
+    let (full, resp) = ui.allocate_exact_size(Vec2::new(w, MENU_ROW), if enabled { Sense::click() } else { Sense::hover() });
+    let rect = full.shrink2(Vec2::new(side, 0.0));
     let hot = enabled && resp.hovered();
     if hot {
-        ui.painter().rect_filled(rect, R_SMALL as f32 + 1.0, if inset { crate::fig::MENU_HOT } else { BRAND });
+        ui.painter().rect_filled(rect, R_SMALL as f32 + 1.0, crate::fig::MENU_HOT);
     }
     let (ink, dim) = if hot {
-        (Color32::WHITE, Color32::WHITE)
+        (crate::fig::MENU_HOT_INK, crate::fig::MENU_HOT_INK.gamma_multiply(0.6))
     } else if enabled {
         (TEXT(), TEXT_SECONDARY())
     } else {
@@ -590,20 +600,20 @@ pub fn menu_submenu<R>(ui: &mut egui::Ui, g: Option<Glyph>, label: &str, add_con
     egui::containers::menu::SubMenu::new().show(ui, &resp, add_contents);
 }
 
-// an option of a dropdown list (measured in Figma 126.9.13, font style menu): 24px rows, a check at 11px for the current one,
-// the label at 24px, the current or hovered row filled with the brand blue
+// an option of a dropdown list: 24px rows inset 6px from the card, the label at 8px, the current or hovered row filled white with black text
+// (no check mark: the field shows the value)
 pub fn menu_option(ui: &mut egui::Ui, on: bool, label: &str) -> bool {
     let font = crate::fig::reg(11.0);
+    let side = crate::fig::MENU_INSET;
     let label_w = ui.fonts_mut(|f| f.layout_no_wrap(label.to_owned(), font.clone(), TEXT()).size().x);
-    let w = menu_width(ui, 24.0 + label_w + 16.0).max(ui.min_rect().width());
-    let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, MENU_ROW), Sense::click());
-    if on || resp.hovered() {
-        ui.painter().rect_filled(rect, R_SMALL as f32 + 1.0, BRAND);
+    let w = menu_width(ui, 8.0 + label_w + 8.0 + 2.0 * side).max(ui.min_rect().width());
+    let (full, resp) = ui.allocate_exact_size(Vec2::new(w, MENU_ROW), Sense::click());
+    let rect = full.shrink2(Vec2::new(side, 0.0));
+    let hot = on || resp.hovered();
+    if hot {
+        ui.painter().rect_filled(rect, R_SMALL as f32 + 1.0, crate::fig::MENU_HOT);
     }
-    if on {
-        paint_glyph_sized(ui.painter(), rect.left_center() + Vec2::new(11.0, 0.0), Glyph::Check, Color32::WHITE, 9.5);
-    }
-    crate::fig::ptext(ui.painter(), rect.left_center() + Vec2::new(24.0, 0.0), Align2::LEFT_CENTER, label, font, if on || resp.hovered() { Color32::WHITE } else { TEXT() });
+    crate::fig::ptext(ui.painter(), rect.left_center() + Vec2::new(8.0, 0.0), Align2::LEFT_CENTER, label, font, if hot { crate::fig::MENU_HOT_INK } else { TEXT() });
     resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::RadioButton, true, on, label));
     resp.clicked()
 }
@@ -612,27 +622,26 @@ pub fn menu_item(ui: &mut egui::Ui, g: Option<Glyph>, label: &str, shortcut: &st
     menu_row(ui, g, None, label, shortcut, enabled, false)
 }
 
-// a row of a toolbar tool menu (measured, Figma 126.9.13 "Move tools"): check at 19px, tool icon at 43px, name at 59px,
-// shortcut 16px from the right
+// a row of a toolbar tool menu: inset 6px from the card, the tool icon at 19px, the name at 35px, the shortcut 16px from the right; the current
+// or hovered row is filled white with black text (no check mark)
 pub fn menu_item_checked(ui: &mut egui::Ui, g: Option<Glyph>, on: bool, label: &str, shortcut: &str) -> bool {
     let font = crate::fig::reg(11.0);
+    let side = crate::fig::MENU_INSET;
     let label_w = ui.fonts_mut(|f| f.layout_no_wrap(label.to_owned(), font.clone(), TEXT()).size().x);
     let short_w = if shortcut.is_empty() { 0.0 } else { 24.0 + ui.fonts_mut(|f| f.layout_no_wrap(shortcut.to_owned(), font.clone(), TEXT()).size().x) };
-    let w = menu_width(ui, 59.0 + label_w + short_w + 16.0).max(ui.min_rect().width());
-    let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, MENU_ROW), Sense::click());
-    let hot = resp.hovered();
+    let w = menu_width(ui, 35.0 + label_w + short_w + 16.0 + 2.0 * side).max(ui.min_rect().width());
+    let (full, resp) = ui.allocate_exact_size(Vec2::new(w, MENU_ROW), Sense::click());
+    let rect = full.shrink2(Vec2::new(side, 0.0));
+    let hot = on || resp.hovered();
     if hot {
-        ui.painter().rect_filled(rect, R_SMALL as f32 + 1.0, BRAND);
+        ui.painter().rect_filled(rect, R_SMALL as f32 + 1.0, crate::fig::MENU_HOT);
     }
-    let (ink, dim) = if hot { (Color32::WHITE, Color32::WHITE) } else { (TEXT(), TEXT_SECONDARY()) };
+    let (ink, dim) = if hot { (crate::fig::MENU_HOT_INK, crate::fig::MENU_HOT_INK.gamma_multiply(0.6)) } else { (TEXT(), TEXT_SECONDARY()) };
     let p = ui.painter();
-    if on {
-        paint_glyph(p, rect.left_center() + Vec2::new(19.0, 0.0), Glyph::Check, ink);
-    }
     if let Some(g) = g {
-        paint_glyph(p, rect.left_center() + Vec2::new(43.0, 0.0), g, ink);
+        paint_glyph(p, rect.left_center() + Vec2::new(19.0, 0.0), g, ink);
     }
-    crate::fig::ptext(p, rect.left_center() + Vec2::new(59.0, 0.0), Align2::LEFT_CENTER, label, font.clone(), ink);
+    crate::fig::ptext(p, rect.left_center() + Vec2::new(35.0, 0.0), Align2::LEFT_CENTER, label, font.clone(), ink);
     if !shortcut.is_empty() {
         crate::fig::ptext(p, rect.right_center() - Vec2::new(16.0, 0.0), Align2::RIGHT_CENTER, shortcut, font, dim);
     }
@@ -654,7 +663,7 @@ pub fn menu_search_row(ui: &mut egui::Ui, label: &str, shortcut: &str) -> bool {
     if hot {
         ui.painter().rect_filled(rect, R_SMALL as f32 + 1.0, crate::fig::MENU_HOT);
     }
-    let (ink, dim) = if hot { (Color32::WHITE, Color32::WHITE) } else { (TEXT(), TEXT_SECONDARY()) };
+    let (ink, dim) = if hot { (crate::fig::MENU_HOT_INK, crate::fig::MENU_HOT_INK.gamma_multiply(0.6)) } else { (TEXT(), TEXT_SECONDARY()) };
     paint_glyph(ui.painter(), rect.left_center() + Vec2::new(16.0, 0.0), Glyph::Search, ink);
     crate::fig::ptext(ui.painter(), rect.left_center() + Vec2::new(32.0, 0.0), Align2::LEFT_CENTER, label, font.clone(), ink);
     crate::fig::ptext(ui.painter(), rect.right_center() - Vec2::new(8.0, 0.0), Align2::RIGHT_CENTER, shortcut, font, dim);
@@ -738,6 +747,10 @@ pub fn all_glyphs() -> Vec<(Glyph, &'static str)> {
         (Glyph::ImagePlus, "ImagePlus"),
         (Glyph::Library, "Library"),
         (Glyph::Clock, "Clock"),
+        (Glyph::Home, "Home"),
+        (Glyph::ChevronLeft, "ChevronLeft"),
+        (Glyph::Folder, "Folder"),
+        (Glyph::FolderPlus, "FolderPlus"),
         (Glyph::MessageSquare, "MessageSquare"),
         (Glyph::Search, "Search"),
         (Glyph::File, "File"),

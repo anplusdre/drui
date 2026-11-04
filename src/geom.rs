@@ -558,7 +558,14 @@ pub fn triangulate(polys: &[Poly]) -> (Vec<Pos2>, Vec<u32>) {
                 pts.push(*p);
             }
         }
-        if let Ok(tris) = earcutr::earcut(&data, &holes, 2) {
+        // degenerate input (a few points, NaN, everything on one spot as it is zoomed far out) makes earcutr panic: skip it, and
+        // never let one bad layer bring the app down
+        if pts.len() < 3 || data.iter().any(|v| !v.is_finite()) {
+            i = j;
+            continue;
+        }
+        let tris = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| earcutr::earcut(&data, &holes, 2))).ok().and_then(Result::ok);
+        if let Some(tris) = tris {
             let base = verts.len() as u32;
             idx.extend(tris.into_iter().map(|t| base + t as u32));
             verts.extend(pts);
