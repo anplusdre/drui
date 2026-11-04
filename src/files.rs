@@ -122,7 +122,7 @@ impl App {
         let name = clean_name(name);
         let name = if name.is_empty() { "Untitled".to_string() } else { name };
         let path = free_path(&folder_of(project), &name);
-        let doc = Doc { pages: vec![Page { name: "Page 1".into(), ..Page::default() }], ..Doc::default() };
+        let doc = Doc { pages: vec![Page { name: "Canvas 1".into(), ..Page::default() }], ..Doc::default() };
         match serde_json::to_string_pretty(&doc).map_err(|e| e.to_string()).and_then(|s| std::fs::write(&path, s).map_err(|e| e.to_string())) {
             Ok(()) => {
                 self.load_from(path.clone());

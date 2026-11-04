@@ -50,7 +50,7 @@ impl App {
     }
 
     // every variant is named after its values
-    fn rename_variants(&mut self, set: usize) {
+    pub(crate) fn rename_variants(&mut self, set: usize) {
         for k in self.variants_of(set) {
             if !self.shapes[k].variant.is_empty() {
                 self.shapes[k].name = variant_name(&self.shapes[k].variant);
@@ -78,7 +78,7 @@ impl App {
         self.shapes[set].size = Vec2::new(width.max(GAP * 2.0), y + row_h + GAP);
     }
 
-    // Ctrl+Shift+K: the selected components become the variants of a new component set (Property 1 = Variant 1, 2, ...)
+    // Ctrl+Shift+K: the selected components become the variants of a new component set (Property 1 = Default, Variant2, ...)
     pub fn combine_as_variants(&mut self) {
         let comps: Vec<u64> = self.sel_roots().into_iter().filter(|&id| self.index_of(id).is_some_and(|i| self.shapes[i].component && self.set_of(i).is_none())).collect();
         let Some(&top) = comps.last() else { return };
@@ -100,7 +100,7 @@ impl App {
             self.shapes[i].parent = Some(sid);
             self.shapes[i].pos = world - self.origin_of(Some(sid));
             if self.shapes[i].variant.is_empty() {
-                self.shapes[i].variant = vec![("Property 1".into(), format!("Variant {}", n + 1))];
+                self.shapes[i].variant = vec![("Property 1".into(), if n == 0 { "Default".into() } else { format!("Variant{}", n + 1) })];
             }
         }
         let si = self.index_of(sid).unwrap();
@@ -119,8 +119,8 @@ impl App {
         let root = ids[&id];
         if let Some(r) = copies.iter_mut().find(|c| c.id == root) {
             match r.variant.first_mut() {
-                Some((_, val)) => *val = format!("Variant {n}"),
-                None => r.variant = vec![("Property 1".into(), format!("Variant {n}"))],
+                Some((_, val)) => *val = format!("Variant{n}"),
+                None => r.variant = vec![("Property 1".into(), format!("Variant{n}"))],
             }
         }
         self.shapes.extend(copies);

@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- **Agent mode**: talk to Claude Code on the canvas; it edits a `claude_edit` copy through the REST API.
+- **File tabs** along the top of the window.
+- **Compact patches**: `POST /patch` accepts `children`, `templates` with `use`, `repeat` / `each`, SVG path vectors and component sets with variants.
+- README screenshot.
+
+### Changed
+- Speed work for big files and `.fig` import. The `.fig` import is still imperfect and large files can still be slow.
+- API fixes from the PR review (writes into a main component from an instance's edit copy, unsaved-edit tracking).
+
 ## 0.2.0 - 2026-10-22
 
 ### Added

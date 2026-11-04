@@ -21,7 +21,7 @@ const CHECKER: f32 = 16.0 / 3.0; // 8 device px at 150%
 const CHECK_A: Color32 = Color32::from_rgb(0x2c, 0x2c, 0x2c); // the transparency checkerboard stays grey in either theme
 const CHECK_B: Color32 = Color32::from_rgb(0x2b, 0x2b, 0x2b);
 
-// the colors used on the current page, for the "On this page" swatches; the app stores them each frame
+// the colors used on the current page, for the "On this canvas" swatches; the app stores them each frame
 pub fn page_colors_id() -> Id {
     Id::new("page-colors")
 }
@@ -411,18 +411,18 @@ pub fn body(ui: &mut egui::Ui, c: &mut Color32, id: Id) -> bool {
     let row = fig::row(ui, fig::ROW);
     let set = Rect::from_min_max(Pos2::new(row.left() + 16.0, row.top()), Pos2::new(row.left() + W - 16.0, row.bottom()));
     ui.painter().rect_stroke(set, fig::RADIUS, Stroke::new(1.0, fig::RULE()), egui::StrokeKind::Inside);
-    fig::text(ui, Pos2::new(set.left() + 8.0, set.center().y), Align2::LEFT_CENTER, "On this page", fig::reg(11.0), TEXT());
+    fig::text(ui, Pos2::new(set.left() + 8.0, set.center().y), Align2::LEFT_CENTER, "On this canvas", fig::reg(11.0), TEXT());
     paint_glyph_sized(ui.painter(), Pos2::new(set.right() - 14.0, set.center().y), Glyph::ChevronDown, TEXT(), 9.5);
     ui.interact(set, id.with("swatch-set"), Sense::hover()).widget_info(|| {
         let mut info = egui::WidgetInfo::labeled(egui::WidgetType::ComboBox, true, "Color swatch set selector");
-        info.current_text_value = Some("On this page".into());
+        info.current_text_value = Some("On this canvas".into());
         info
     });
     fig::row(ui, 8.0);
     let colors: Vec<Color32> = ui.ctx().data(|d| d.get_temp(page_colors_id())).unwrap_or_default();
     if colors.is_empty() {
         let r = fig::row(ui, fig::ROW);
-        fig::text(ui, Pos2::new(r.left() + 16.0, r.center().y), Align2::LEFT_CENTER, "No colors on this page yet", fig::reg(11.0), TEXT_SECONDARY());
+        fig::text(ui, Pos2::new(r.left() + 16.0, r.center().y), Align2::LEFT_CENTER, "No colors on this canvas yet", fig::reg(11.0), TEXT_SECONDARY());
     }
     for line in colors.chunks(9) {
         let r = fig::row(ui, 24.0);

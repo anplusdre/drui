@@ -1,4 +1,4 @@
-"""Calls drui's REST API with the token from %TEMP%\\drui-api.json.
+"""Calls drui's REST API with DRUI_API_URL and DRUI_API_TOKEN when set (agent mode sets them, so two drui windows never mix up), else the URL and token from %TEMP%\\drui-api.json.
 
     python tools/dr.py GET /outline
     python tools/dr.py POST /claude_edit '{"id": 12}'      (a body of @file.json is read from that file, @- from stdin)
@@ -8,16 +8,26 @@
 import base64
 import json
 import os
+import re
 import sys
 import tempfile
 import urllib.error
 import urllib.request
 
 
+def fix_path(p):
+    """Git Bash rewrites an argument like /outline into C:/Program Files/Git/outline before python sees it: undo that, and accept a
+    path without its leading slash"""
+    m = re.match(r"^[A-Za-z]:[\\/].*?[\\/]Git(?:[\\/]usr)?([\\/].*)$", p)
+    if m:
+        p = m.group(1).replace("\\", "/")
+    return p if p.startswith("/") else "/" + p
+
+
 def main():
     if len(sys.argv) < 3:
         sys.exit(__doc__)
-    method, path = sys.argv[1].upper(), sys.argv[2]
+    method, path = sys.argv[1].upper(), fix_path(sys.argv[2])
     write_dir = None
     if method == "WRITE":
         method, write_dir = "GET", sys.argv[3]
@@ -27,9 +37,12 @@ def main():
     # a body of @file.json is read from the file ("-" from stdin): shells differ in how they pass quotes
     if body and body.startswith("@"):
         body = sys.stdin.read() if body == "@-" else open(body[1:], encoding="utf8").read()
-    info = json.load(open(os.path.join(tempfile.gettempdir(), "drui-api.json")))
-    req = urllib.request.Request(info["url"] + path, data=body.encode() if body else None, method=method)
-    req.add_header("Authorization", "Bearer " + info["token"])
+    url, token = os.environ.get("DRUI_API_URL"), os.environ.get("DRUI_API_TOKEN")
+    if not (url and token):
+        info = json.load(open(os.path.join(tempfile.gettempdir(), "drui-api.json")))
+        url, token = info["url"], info["token"]
+    req = urllib.request.Request(url + path, data=body.encode() if body else None, method=method)
+    req.add_header("Authorization", "Bearer " + token)
     try:
         with urllib.request.urlopen(req) as r:
             data, ctype = r.read(), r.headers.get("Content-Type", "")

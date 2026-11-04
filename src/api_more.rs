@@ -20,9 +20,10 @@ impl App {
         json!({
             "mode": crate::Mode::ALL.iter().find(|m| m.0 == self.mode).map(|m| m.1),
             "zoom": self.zoom,
-            "left_tab": match self.left_tab { crate::LeftTab::Layers => "layers", crate::LeftTab::Assets => "assets", crate::LeftTab::History => "history", crate::LeftTab::Comments => "comments" },
-            "left_min": self.left_min, "hide_ui": self.hide_ui, "light_ui": self.light_ui,
-            "snap": self.snap, "snap_pixels": self.snap_pixels, "pixel_grid": self.pixel_grid, "rulers": self.rulers, "layout_guides": self.layout_guides,
+            "assets_open": self.assets_open,
+            "left_tab": match self.left_tab { crate::LeftTab::Layers => "layers", crate::LeftTab::History => "history", crate::LeftTab::Comments => "comments" },
+            "left_min": self.left_min, "right_min": self.right_min, "hide_ui": self.hide_ui, "light_ui": self.light_ui,
+            "snap": self.snap, "snap_pixels": self.snap_pixels, "pixel_grid": self.pixel_grid, "layout_guides": self.layout_guides,
             "prop_labels": self.prop_labels, "labels": self.labels, "spell": self.spell, "outlines": self.outlines,
             "outline_hidden": self.outline_hidden, "outline_bounds": self.outline_bounds,
             "pixel_preview": self.pixel_preview, "color_profile": if self.color_profile == 1 { "p3" } else { "srgb" },
@@ -35,12 +36,12 @@ impl App {
     // applies the fields that are present; a bad value stops it before anything is applied
     fn set_view(&mut self, v: &Value) -> Result<(), String> {
         let obj = v.as_object().ok_or("expected a JSON object")?;
-        let known = ["mode", "zoom", "left_tab", "left_min", "hide_ui", "light_ui", "snap", "snap_pixels", "pixel_grid", "rulers", "layout_guides", "prop_labels", "labels", "spell", "outlines", "outline_hidden", "outline_bounds", "pixel_preview", "color_profile", "nudge_small", "nudge_big", "handle_mirror", "show_comments", "show_resolved", "guides"];
+        let known = ["mode", "zoom", "left_tab", "left_min", "right_min", "hide_ui", "light_ui", "snap", "snap_pixels", "pixel_grid", "layout_guides", "prop_labels", "labels", "spell", "outlines", "outline_hidden", "outline_bounds", "pixel_preview", "color_profile", "nudge_small", "nudge_big", "handle_mirror", "show_comments", "show_resolved", "guides"];
         if let Some(k) = obj.keys().find(|k| !known.contains(&k.as_str())) {
             return Err(format!("unknown setting {k:?}: GET /view lists them"));
         }
         // a value of the wrong type is an error, not something to skip
-        let bools = ["left_min", "hide_ui", "light_ui", "snap", "snap_pixels", "pixel_grid", "rulers", "layout_guides", "prop_labels", "labels", "spell", "outlines", "outline_hidden", "outline_bounds", "show_comments", "show_resolved"];
+        let bools = ["left_min", "right_min", "hide_ui", "light_ui", "snap", "snap_pixels", "pixel_grid", "layout_guides", "prop_labels", "labels", "spell", "outlines", "outline_hidden", "outline_bounds", "show_comments", "show_resolved"];
         let numbers = ["zoom", "nudge_small", "nudge_big", "pixel_preview", "handle_mirror"];
         let strings = ["mode", "left_tab", "color_profile"];
         for (k, val) in obj {
@@ -53,9 +54,13 @@ impl App {
             Some(m) => Some(crate::Mode::ALL.iter().find(|x| x.1.to_lowercase().starts_with(&m.to_lowercase())).ok_or("mode is design, draw, motion or dev")?.0),
             None => None,
         };
+        let mut assets = false;
         let tab = match v["left_tab"].as_str() {
             Some("layers") => Some(crate::LeftTab::Layers),
-            Some("assets") => Some(crate::LeftTab::Assets),
+            Some("assets") => {
+                assets = true; // the Assets list is a window now, not a tab
+                None
+            }
             Some("history") => Some(crate::LeftTab::History),
             Some("comments") => Some(crate::LeftTab::Comments),
             Some(_) => return Err("left_tab is layers, assets, history or comments".into()),
@@ -87,12 +92,12 @@ impl App {
             }
         };
         flag("left_min", &mut self.left_min);
+        flag("right_min", &mut self.right_min);
         flag("hide_ui", &mut self.hide_ui);
         flag("light_ui", &mut self.light_ui);
         flag("snap", &mut self.snap);
         flag("snap_pixels", &mut self.snap_pixels);
         flag("pixel_grid", &mut self.pixel_grid);
-        flag("rulers", &mut self.rulers);
         flag("layout_guides", &mut self.layout_guides);
         flag("prop_labels", &mut self.prop_labels);
         flag("labels", &mut self.labels);
@@ -116,6 +121,10 @@ impl App {
         if let Some(t) = tab {
             self.left_tab = t;
         }
+        if assets {
+            self.assets_open = true;
+            self.vars_open = false;
+        }
         if let Some(g) = guides {
             self.guides = g;
         }
@@ -132,7 +141,7 @@ impl App {
         json!({
             "time": self.anim_time, "length": self.anim_len(), "loop": self.pages[self.cur].anim_loop, "playing": self.anim_play.is_some(),
             "mode": crate::Mode::ALL.iter().find(|m| m.0 == self.mode).map(|m| m.1),
-            "note": "the page shows the playhead's frame in Motion mode (PUT /view {\"mode\": \"motion\"}); edits there become keyframes",
+            "note": "the canvas shows the playhead's frame in Motion mode (PUT /view {\"mode\": \"motion\"}); edits there become keyframes",
         })
     }
 
@@ -380,7 +389,7 @@ impl App {
             ("POST", ["versions", i, "restore"]) => {
                 let i = index(i, self.versions.len())?;
                 if !confirmed(&body()?) {
-                    return Err(Resp::err(403, "restoring replaces the open page with the saved one: send {\"confirm\": true} only when the person asked for it"));
+                    return Err(Resp::err(403, "restoring replaces the open canvas with the saved one: send {\"confirm\": true} only when the person asked for it"));
                 }
                 let snap = self.snap();
                 self.undo.push(snap);

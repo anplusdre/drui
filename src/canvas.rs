@@ -3,9 +3,9 @@ use egui::{Align2, Color32, CursorIcon, FontId, Painter, PointerButton, Pos2, Re
 
 use crate::geom::{BoolOp, flatten};
 use crate::model::*;
-use crate::{App, BG, BRAND, Drag, GUIDE, HANDLE, Mode, TEXT_SECONDARY, Tool};
+use crate::{App, BG_MENU, BG_PRESSED, BRAND, Drag, GUIDE, HANDLE, Mode, TEXT_SECONDARY, Tool};
 
-const RULER: f32 = 18.0;
+const GUIDE_EDGE: f32 = 18.0; // a guide dragged into this strip along the canvas's top or left edge is deleted
 const DIRS: [(i8, i8); 8] = [(-1, -1), (0, -1), (1, -1), (1, 0), (1, 1), (0, 1), (-1, 1), (-1, 0)];
 
 // what the selection handles act on
@@ -475,42 +475,6 @@ impl App {
         }
     }
 
-    fn draw_rulers(&self, painter: &Painter, rect: Rect) {
-        let font = FontId::proportional(9.0);
-        let (mut step, mut k) = (1.0f32, 0);
-        while step * self.zoom < 60.0 {
-            step *= [2.0, 2.5, 2.0][k % 3];
-            k += 1;
-        }
-        let top = Rect::from_min_max(rect.min + Vec2::new(RULER, 0.0), Pos2::new(rect.max.x, rect.min.y + RULER));
-        let left = Rect::from_min_max(rect.min + Vec2::new(0.0, RULER), Pos2::new(rect.min.x + RULER, rect.max.y));
-        painter.rect_filled(top, 0.0, BG());
-        painter.rect_filled(left, 0.0, BG());
-        painter.rect_filled(Rect::from_min_size(rect.min, Vec2::splat(RULER)), 0.0, BG());
-        let tick = Stroke::new(1.0, TEXT_SECONDARY());
-        let (w0, w1) = (self.to_world(rect.min, rect.min + Vec2::new(RULER, RULER)), self.to_world(rect.min, rect.max));
-        let mut x = (w0.x / step).floor() * step;
-        while x <= w1.x {
-            let sx = rect.min.x + self.pan.x + x * self.zoom;
-            if sx >= rect.min.x + RULER {
-                painter.line_segment([Pos2::new(sx, rect.min.y + 10.0), Pos2::new(sx, rect.min.y + RULER)], tick);
-                painter.text(Pos2::new(sx + 2.0, rect.min.y + 1.0), Align2::LEFT_TOP, format!("{x:.0}"), font.clone(), TEXT_SECONDARY());
-            }
-            x += step;
-        }
-        let mut y = (w0.y / step).floor() * step;
-        while y <= w1.y {
-            let sy = rect.min.y + self.pan.y + y * self.zoom;
-            if sy >= rect.min.y + RULER {
-                painter.line_segment([Pos2::new(rect.min.x + 10.0, sy), Pos2::new(rect.min.x + RULER, sy)], tick);
-                let galley = painter.layout_no_wrap(format!("{y:.0}"), font.clone(), TEXT_SECONDARY());
-                let pivot = Pos2::new(rect.min.x + 3.0, sy + 3.0 + galley.size().x);
-                painter.add(egui::epaint::TextShape::new(pivot, galley, TEXT_SECONDARY()).with_angle(-std::f32::consts::FRAC_PI_2));
-            }
-            y += step;
-        }
-    }
-
     // blend modes can't be done by egui's painter, so the page is rendered by resvg (half size while dragging)
     // and shown as one image; frame names are still drawn on top
     fn draw_composited(&mut self, ctx: &egui::Context, painter: &Painter, rect: Rect) {
@@ -892,13 +856,18 @@ impl App {
         self.view = resp.rect;
         resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Other, true, "Canvas"));
         painter.rect_filled(resp.rect, 0.0, self.page_bg());
+        crate::prof::lap("canvas: allocate+background");
         self.prepare_textures(&ctx);
+        crate::prof::lap("prepare_textures");
         if crate::textrun::ensure_fonts(&ctx, &self.shapes) {
             ctx.request_repaint();
         }
+        crate::prof::lap("ensure_fonts");
         self.snap_lines.clear();
         self.fit_texts(&painter);
+        crate::prof::lap("fit_texts");
         self.settle();
+        crate::prof::lap("settle in canvas");
 
         if self.present.is_some() {
             self.canvas_present(ui, &resp, &painter, origin);
@@ -913,7 +882,7 @@ impl App {
             let scroll = wheel_delta(ui);
             let (zoom_d, hover) = ui.input(|i| (i.zoom_delta(), i.pointer.hover_pos()));
             self.pan += scroll;
-            if let (true, Some(h)) = (zoom_d != 1.0, hover) {
+            if let (true, Some(h)) = (zoom_d != 1.0 && zoom_d.is_finite() && zoom_d > 0.0, hover) {
                 let w = self.to_world(origin, h);
                 self.zoom = (self.zoom * zoom_d).clamp(0.05, 64.0);
                 self.pan = h - origin - w.to_vec2() * self.zoom;
@@ -932,9 +901,7 @@ impl App {
         }
 
         let (shift, hover) = ui.input(|i| (i.modifiers.shift, i.pointer.hover_pos()));
-        let ruler = if self.rulers { RULER } else { 0.0 };
-        let in_top = |p: Pos2| p.y < origin.y + ruler && p.x >= origin.x + ruler;
-        let in_left = |p: Pos2| p.x < origin.x + ruler && p.y >= origin.y + ruler;
+        self.deep_pick = ui.input(|i| i.modifiers.command || i.modifiers.ctrl);
 
         // cursor feedback
         if let Some(h) = hover.filter(|_| self.tool == Tool::Select && matches!(self.drag, Drag::None) && self.mode != Mode::Dev) {
@@ -1048,10 +1015,7 @@ impl App {
                             let d = if g.vertical { (self.to_screen(origin, Pos2::new(g.pos, 0.0)).x - press.x).abs() } else { (self.to_screen(origin, Pos2::new(0.0, g.pos)).y - press.y).abs() };
                             d <= 4.0
                         });
-                        if self.rulers && (in_top(press) || in_left(press)) {
-                            self.guides.push(Guide { vertical: in_left(press), pos: if in_left(press) { w.x } else { w.y } });
-                            Drag::Guide(self.guides.len() - 1)
-                        } else if let Some(g) = guide {
+                        if let Some(g) = guide {
                             Drag::Guide(g)
                         } else if let Some((c, k, part)) = self.node_hit(origin, press).filter(|_| self.node_edit) {
                             let alt = ui.input(|i| i.modifiers.alt);
@@ -1111,6 +1075,17 @@ impl App {
                                     self.sel.clear();
                                 }
                                 self.sel.push(id);
+                            }
+                            // Alt+drag leaves the layers where they are and drags see-through copies of them, which drop where
+                            // the pointer is released
+                            if ui.input(|i| i.modifiers.alt) {
+                                self.duplicate_by(Vec2::ZERO);
+                                self.ghost = self.sel_roots().into_iter().filter_map(|id| Some((id, self.shapes[self.index_of(id)?].opacity))).collect();
+                                for &(id, o) in &self.ghost.clone() {
+                                    if let Some(i) = self.index_of(id) {
+                                        self.shapes[i].opacity = o * 0.5;
+                                    }
+                                }
                             }
                             Drag::Move { raw: Vec2::ZERO, bounds: self.sel_bounds().unwrap_or(Rect::NOTHING) }
                         } else {
@@ -1201,6 +1176,7 @@ impl App {
             resp.context_menu(|ui| self.canvas_menu(ui, &ctx));
         }
 
+        crate::prof::lap("canvas: input handling");
         // draw
         let painter = painter.with_clip_rect(resp.rect);
         // blend modes and masks of any shape other than a plain box (whose bounding-box clip is exact) need the page rendered as SVG
@@ -1209,6 +1185,7 @@ impl App {
         } else {
             self.draw_level(&painter, origin, None, Vec2::ZERO, 1.0);
         }
+        crate::prof::lap("draw shapes");
         if self.outlines {
             self.draw_outlines(&painter, resp.rect, origin);
         }
@@ -1216,8 +1193,7 @@ impl App {
         self.draw_pixel_grid(&painter, resp.rect, origin);
         // hover outline, like Figma: shows what a click would pick
         if self.tool == Tool::Select && matches!(self.drag, Drag::None) && !self.node_edit && resp.hovered() {
-            let over_ruler = hover.is_some_and(|p| self.rulers && (in_top(p) || in_left(p)));
-            if let (Some(h), false) = (hover, over_ruler) {
+            if let Some(h) = hover {
                 if let Some(i) = self.hit_test(self.to_world(origin, h)).map(|id| self.select_unit(id)).and_then(|id| self.index_of(id)) {
                     if !self.sel.contains(&self.shapes[i].id) {
                         self.outline_shape(&painter, origin, i, Stroke::new(1.5, BRAND.gamma_multiply(0.85)));
@@ -1225,6 +1201,7 @@ impl App {
                 }
             }
         }
+        crate::prof::lap("hover hit_test + outline");
         for g in &self.guides {
             let (a, b) = if g.vertical {
                 let x = self.to_screen(origin, Pos2::new(g.pos, 0.0)).x;
@@ -1301,12 +1278,11 @@ impl App {
             let r = Rect::from_two_pos(self.to_screen(origin, start), p);
             painter.rect(r, 0.0, BRAND.gamma_multiply(0.12), Stroke::new(1.0, BRAND), StrokeKind::Inside);
         }
+        crate::prof::lap("selection + overlays");
         self.paint_comments(ui, &painter, origin, resp.rect);
-        if self.rulers {
-            self.draw_rulers(&painter, resp.rect);
-        }
         self.text_editor(&ctx, origin);
         self.comment_popups(&ctx, origin, resp.rect);
+        crate::prof::lap("comments, text editor");
     }
 
     // a click (no drag) with the select tool
@@ -1557,6 +1533,11 @@ impl App {
                 }
             }
             Drag::Move { .. } => {
+                for (id, o) in std::mem::take(&mut self.ghost) {
+                    if let Some(i) = self.index_of(id) {
+                        self.shapes[i].opacity = o;
+                    }
+                }
                 // dropping moved shapes onto a frame (or empty canvas) reparents them
                 if let Some(p) = hover.filter(|_| !keep_parent) {
                     let ids = self.sel_roots();
@@ -1579,10 +1560,10 @@ impl App {
                 }
             }
             Drag::Guide(g) => {
-                // dragged back onto a ruler: delete it
+                // dragged into the edge strip: delete it
                 if let (Some(p), Some(_)) = (hover, self.guides.get(g)) {
                     let r = self.view;
-                    if p.y < r.top() + RULER || p.x < r.left() + RULER {
+                    if p.y < r.top() + GUIDE_EDGE || p.x < r.left() + GUIDE_EDGE {
                         self.guides.remove(g);
                     }
                 }
@@ -1686,7 +1667,7 @@ struct WheelQueue {
 /// queued and paid out almost at once, the view keeps coasting from the finger speed the moment the
 /// fingers stop, and the flush is paid out as a glide that eases in, minus what was already coasted.
 /// Everything is paid by frame time, so the motion is even whatever the frame rate.
-fn wheel_delta(ui: &egui::Ui) -> Vec2 {
+pub(crate) fn wheel_delta(ui: &egui::Ui) -> Vec2 {
     const LIVE_TAU: f32 = 0.02; // seconds for the live queue to drain by ~63%
     const GLIDE_TAU: f32 = 0.15; // the same for each of the two easing stages of an inertia flush
     const COAST_TAU: f32 = 0.15; // speed decay while coasting through the driver's pause

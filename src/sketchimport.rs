@@ -23,7 +23,7 @@ pub struct SketchSummary {
 
 impl SketchSummary {
     pub fn text(&self) -> String {
-        let mut s = format!("imported {} page{}, {} layers", self.pages, if self.pages == 1 { "" } else { "s" }, self.layers);
+        let mut s = format!("imported {} canvas{}, {} layers", self.pages, if self.pages == 1 { "" } else { "es" }, self.layers);
         if self.symbols > 0 {
             s += &format!(", {} symbols", self.symbols);
         }
@@ -435,12 +435,12 @@ impl App {
         let doc = imp.json("document.json")?;
         let refs: Vec<String> = doc.get("pages").and_then(Value::as_array).into_iter().flatten().filter_map(|p| p.get("_ref").and_then(Value::as_str)).map(str::to_owned).collect();
         if refs.is_empty() {
-            return Err("this file has no pages".into());
+            return Err("this file has no canvases".into());
         }
         let mut page_info: Vec<(String, Color32)> = vec![];
         for (n, r) in refs.iter().enumerate() {
             let page = imp.json(&format!("{r}.json"))?;
-            page_info.push((page.get("name").and_then(Value::as_str).unwrap_or("Page").to_owned(), page.get("backgroundColor").map(color).unwrap_or(crate::theme::SUNKEN())));
+            page_info.push((page.get("name").and_then(Value::as_str).unwrap_or("Canvas").to_owned(), page.get("backgroundColor").map(color).unwrap_or(crate::theme::SUNKEN())));
             for l in page.get("layers").and_then(Value::as_array).cloned().unwrap_or_default() {
                 imp.build(&l, None, n);
             }

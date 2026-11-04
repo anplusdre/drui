@@ -1,7 +1,8 @@
 // Rich text: mixed styles inside one text layer (runs), case, decoration, lists, paragraph spacing and indent, truncation, super and
 // subscript, weights of the variable Inter and installed system fonts. `display_chars` is the one place that decides what is shown;
 // the egui layout job (canvas, fitting) and the SVG export both start from it.
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use egui::epaint::text::VariationCoords;
@@ -226,10 +227,14 @@ pub fn family_weights(family: &str) -> Vec<u16> {
     w
 }
 
-fn registered() -> &'static Mutex<HashSet<String>> {
-    static REG: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
-    REG.get_or_init(|| Mutex::new(HashSet::new()))
+// face key -> the frame it was added to egui in. egui binds a family one frame later, so laying text out with it in that same
+// frame panics ("FontFamily::Name(..) is not bound to any fonts"): `font_for` only uses a key from an earlier frame.
+fn registered() -> &'static Mutex<HashMap<String, u64>> {
+    static REG: OnceLock<Mutex<HashMap<String, u64>>> = OnceLock::new();
+    REG.get_or_init(|| Mutex::new(HashMap::new()))
 }
+
+static FRAME: AtomicU64 = AtomicU64::new(0);
 
 fn face_key(family: &str, weight: u16) -> String {
     format!("sys:{family}:{weight}")
@@ -240,8 +245,16 @@ fn nearest_weight(family: &str, weight: u16) -> Option<u16> {
     family_weights(family).into_iter().min_by_key(|w| (*w as i32 - weight as i32).abs())
 }
 
+// changes whenever a layout made before could now come out differently: a system face became usable in egui, or the theme's fonts did
+pub fn font_generation() -> usize {
+    let usable = registered().lock().map_or(0, |r| r.values().filter(|&&f| f < FRAME.load(Ordering::Relaxed)).count());
+    usable * 2 + crate::fig::FONTS_READY.load(Ordering::Relaxed) as usize
+}
+
 // installs the system faces the text layers use into egui (it takes effect on the next frame); returns true when it added any
 pub fn ensure_fonts(ctx: &egui::Context, shapes: &[Shape]) -> bool {
+    let frame = ctx.cumulative_frame_nr();
+    FRAME.store(frame, Ordering::Relaxed);
     let mut want: HashSet<(String, u16)> = HashSet::new();
     for s in shapes.iter().filter(|s| s.kind == Kind::Text) {
         for fam in std::iter::once(s.family.clone()).chain(s.runs.iter().filter_map(|r| r.family.clone())).filter(|f| !f.is_empty()) {
@@ -257,7 +270,7 @@ pub fn ensure_fonts(ctx: &egui::Context, shapes: &[Shape]) -> bool {
     for (fam, w) in want {
         let key = face_key(&fam, w);
         let mut reg = registered().lock().unwrap();
-        if reg.contains(&key) {
+        if reg.contains_key(&key) {
             continue;
         }
         let db = crate::export::fonts();
@@ -267,7 +280,7 @@ pub fn ensure_fonts(ctx: &egui::Context, shapes: &[Shape]) -> bool {
         let mut fd = egui::FontData::from_owned(data);
         fd.index = index;
         ctx.add_font(egui::epaint::text::FontInsert::new(&key, fd, vec![egui::epaint::text::InsertFontFamily { family: FontFamily::Name(key.clone().into()), priority: egui::epaint::text::FontPriority::Highest }]));
-        reg.insert(key);
+        reg.insert(key, frame);
         added = true;
     }
     added
@@ -278,7 +291,7 @@ fn font_for(s: &Shape, st: &CharStyle, size: f32) -> (FontId, VariationCoords) {
     if !st.family.is_empty() {
         if let Some(w) = nearest_weight(&st.family, st.weight) {
             let key = face_key(&st.family, w);
-            if registered().lock().unwrap().contains(&key) {
+            if registered().lock().unwrap().get(&key).is_some_and(|&f| f < FRAME.load(Ordering::Relaxed)) {
                 let tags: Vec<([u8; 4], f32)> = s.axes.iter().filter_map(|(t, v)| Some((t.as_bytes().get(0..4)?.try_into().ok()?, *v))).collect();
                 let coords = if tags.is_empty() { VariationCoords::default() } else { VariationCoords::new(tags.iter().map(|(t, v)| (t, *v))) };
                 return (FontId::new(size, FontFamily::Name(key.into())), coords);
@@ -290,7 +303,8 @@ fn font_for(s: &Shape, st: &CharStyle, size: f32) -> (FontId, VariationCoords) {
         return (FontId::new(size, FontFamily::Monospace), VariationCoords::default());
     }
     // the old Semi Bold keeps its own static face; any other weight uses the variable Inter's weight axis
-    if st.weight == 600 && s.weight == 0 && s.opsz == 0.0 && s.runs.iter().all(|r| r.weight.is_none()) {
+    // (its family is bound the frame after the theme's fonts are set, see `fig::FONTS_READY`)
+    if st.weight == 600 && s.weight == 0 && s.opsz == 0.0 && s.runs.iter().all(|r| r.weight.is_none()) && crate::fig::FONTS_READY.load(Ordering::Relaxed) {
         return (FontId::new(size, FontFamily::Name("semibold".into())), VariationCoords::default());
     }
     // the variable Inter's axes: weight, and optical size when the layer sets one (Type settings > Variable)

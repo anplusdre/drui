@@ -4,7 +4,7 @@ use egui::{Align2, Color32, FontId, Pos2, Sense, Stroke, Vec2};
 
 use crate::glyphs::{Glyph, paint_glyph_sized};
 use crate::model::Kind;
-use crate::{BG, BG_MENU, BG_PRESSED, BG_SECONDARY, BRAND, R_MEDIUM, TEXT, TEXT_TERTIARY};
+use crate::{BG, BG_MENU, BG_PRESSED, BG_SECONDARY, BRAND, R_LARGE, R_MEDIUM, TEXT, TEXT_TERTIARY};
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum Icon {
@@ -50,8 +50,8 @@ pub fn apply_theme(ctx: &egui::Context) {
             let family = s.text_styles[&style].family.clone();
             s.text_styles.insert(style, FontId::new(size, family));
         }
-        // Figma's menus run their rows edge to edge: no side padding, 8px above the first row and 6px below the last (measured)
-        s.spacing.menu_margin = egui::Margin { left: 0, right: 0, top: 8, bottom: 6 };
+        // the rows of a plain menu sit `fig::MENU_INSET` in from the card's side edges (the rows do it, so this stays 0 and `inset_menu` stays off); 6px above the first row and below the last
+        s.spacing.menu_margin = egui::Margin { left: 0, right: 0, top: 6, bottom: 6 };
     });
     let mut v = if crate::theme::is_light() { egui::Visuals::light() } else { egui::Visuals::dark() };
     v.panel_fill = BG();
@@ -135,7 +135,7 @@ pub fn tool_button(ui: &mut egui::Ui, selected: bool, icon: Icon, tip: &str, key
     } else {
         Color32::TRANSPARENT
     };
-    ui.painter().rect_filled(rect, R_MEDIUM, bg);
+    ui.painter().rect_filled(rect, R_LARGE - 6, bg); // concentric with the toolbar pill (R_LARGE, 6px padding)
     paint_icon(ui.painter(), rect.center() - Vec2::new(0.0, 1.0), icon, TEXT());
     if !key.is_empty() {
         ui.painter().text(rect.right_bottom() - Vec2::new(4.0, 2.0), Align2::RIGHT_BOTTOM, key, FontId::proportional(8.5), if selected { TEXT() } else { TEXT_TERTIARY() });

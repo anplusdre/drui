@@ -26,6 +26,8 @@ const MAX_BODY: usize = 64 << 20;
 const RATE: f64 = 30.0;
 const BURST: f64 = 60.0;
 const MAX_CONNS: usize = 32;
+// how long a client waits for the app; a request older than this is dropped unanswered, see `poll_api`
+const WAIT: Duration = Duration::from_secs(15);
 
 const PRO_ROUTES: [&str; 0] = [];
 
@@ -93,6 +95,7 @@ pub struct Req {
     pub query: HashMap<String, String>,
     pub body: Vec<u8>,
     reply: Sender<Resp>,
+    at: std::time::Instant, // when the client started waiting
 }
 
 pub struct Resp {
@@ -215,9 +218,9 @@ fn serve(mut conn: TcpStream, port: u16, token: &str, tx: Sender<Req>, ctx: egui
             let query: HashMap<String, String> = query.split('&').filter_map(|kv| kv.split_once('=')).map(|(k, v)| (k.to_string(), v.to_string())).collect();
             let path = path.split('/').filter(|s| !s.is_empty()).map(String::from).collect();
             let (reply, wait) = channel();
-            if tx.send(Req { method, path, query, body, reply }).is_ok() {
+            if tx.send(Req { method, path, query, body, reply, at: std::time::Instant::now() }).is_ok() {
                 ctx.request_repaint();
-                wait.recv_timeout(Duration::from_secs(15)).unwrap_or_else(|_| Resp::err(504, "the app did not answer in time"))
+                wait.recv_timeout(WAIT).unwrap_or_else(|_| Resp::err(504, "the app did not answer in time"))
             } else {
                 Resp::err(503, "the app is closing")
             }
@@ -327,7 +330,7 @@ fn merge_shape(s: &Shape, patch: &Value) -> Result<Shape, String> {
     let (Some(obj), Some(p)) = (v.as_object_mut(), patch.as_object()) else { return Err("a layer is a JSON object".into()) };
     for (k, val) in p {
         match k.as_str() {
-            "id" | "ref" | "parent_ref" => {}
+            "id" | "ref" | "parent_ref" | "d" | "svg" | "property" => {}
             "x" | "y" => obj["pos"][k.as_str()] = val.clone(),
             "w" => obj["size"]["x"] = val.clone(),
             "h" => obj["size"]["y"] = val.clone(),
@@ -354,6 +357,10 @@ impl App {
         let Some(api) = &self.api else { return };
         let reqs: Vec<Req> = api.rx.try_iter().collect();
         for r in reqs {
+            // its client has had a 504 by now and may ask again: doing it as well would do it twice
+            if r.at.elapsed() >= WAIT {
+                continue;
+            }
             let resp = self.api_handle(ctx, &r);
             let _ = r.reply.send(resp);
         }
@@ -361,6 +368,7 @@ impl App {
 
     // the one place that edits the document on behalf of scripts: the API's POST /patch (and the plugins' results, in the paid build)
     pub(crate) fn apply_patch(&mut self, p: &Value) -> Result<String, String> {
+        let p = &crate::patch_expand::expand_patch(p)?;
         let mut report = Vec::new();
         let mut refs: HashMap<String, u64> = HashMap::new();
         let ids = |v: &Value| -> Vec<u64> { v.as_array().map(|a| a.iter().filter_map(Value::as_u64).collect()).unwrap_or_default() };
@@ -376,7 +384,22 @@ impl App {
             self.shapes[i] = merge_shape(&self.shapes[i], patch)?;
         }
         let mut added = Vec::new();
+        let mut props = Vec::new();
         for new in p["add"].as_array().into_iter().flatten() {
+            // an SVG document: a frame of vector layers at x, y
+            if let Some(svg) = new["svg"].as_str() {
+                let parent = match new["parent_ref"].as_str() {
+                    Some(r) => Some(*refs.get(r).ok_or_else(|| format!("add: parent_ref {r} is not an earlier ref"))?),
+                    None => new["parent"].as_u64(),
+                };
+                let at = Pos2::new(new["x"].as_f64().unwrap_or(0.0) as f32, new["y"].as_f64().unwrap_or(0.0) as f32);
+                let fid = self.svg_frame(svg, parent, at, new["name"].as_str().unwrap_or("SVG"))?;
+                if let Some(r) = new["ref"].as_str() {
+                    refs.insert(r.to_string(), fid);
+                }
+                added.push(fid);
+                continue;
+            }
             let mut s = merge_shape(&Shape::default(), new)?;
             s.id = self.new_id();
             if let Some(r) = new["ref"].as_str() {
@@ -388,11 +411,49 @@ impl App {
             if s.parent.is_some_and(|pid| self.index_of(pid).is_none()) {
                 return Err(format!("add: parent of {} does not exist", s.name));
             }
+            // a vector: SVG path data, drawn from the layer's x, y (fill and stroke as for any layer)
+            if let Some(d) = new["d"].as_str() {
+                let off = s.pos.to_vec2();
+                let cs: Vec<Contour> = crate::svg_import::path_contours(d)?
+                    .into_iter()
+                    .map(|mut c| {
+                        c.pts.iter_mut().for_each(|q| q.p += off);
+                        c
+                    })
+                    .collect();
+                s.kind = Kind::Path;
+                s.set_path_world(&cs);
+            }
             if s.name.is_empty() {
                 s.name = format!("{:?}", s.kind);
             }
+            if let Some(k) = new["property"].as_str() {
+                let kind = match k {
+                    "Bool" => CompPropKind::Bool,
+                    "Text" => CompPropKind::Text,
+                    "Swap" => CompPropKind::Swap,
+                    _ => return Err(format!("add: property is Bool, Text or Swap, not {k:?}")),
+                };
+                props.push((s.id, kind));
+            }
             added.push(s.id);
             self.shapes.push(s);
+        }
+        // a component set made here: its variants are named after their values and laid out in a grid (after the layouts settled, so
+        // hugging buttons have their size); a layer with `property` becomes a component property, once per set (the same layer of the
+        // other variants joins it)
+        let sets: Vec<usize> = added.iter().filter_map(|&id| self.index_of(id)).filter(|&i| self.shapes[i].component_set).collect();
+        if !sets.is_empty() || !props.is_empty() {
+            self.settle();
+        }
+        for (id, kind) in props {
+            if let Some(i) = self.index_of(id).filter(|&i| self.shapes[i].cprop_link.is_none()) {
+                self.create_property(i, kind);
+            }
+        }
+        for i in sets {
+            self.rename_variants(i);
+            self.arrange_variants(i);
         }
         if !added.is_empty() {
             report.push(format!("added {}", added.len()));
@@ -461,7 +522,7 @@ impl App {
                     return Err(Resp::err(409, "the open document has unsaved edits: POST /save first, or send \"discard\": true"));
                 }
                 match (seg[0], path.extension().and_then(|e| e.to_str()).map(str::to_lowercase).as_deref()) {
-                    ("import", Some("fig")) => self.import_fig(path),
+                    ("import", Some("fig")) => self.import_fig_now(path),
                     ("import", Some("sketch")) => self.import_sketch(path),
                     ("import", _) => return Err(Resp::err(400, "import takes a .fig or .sketch file; /open takes a drui file")),
                     _ => self.load_from(path),
@@ -483,7 +544,7 @@ impl App {
             ("PUT", ["pages", i]) => {
                 let i = id_of(i)? as usize;
                 if i >= self.pages.len() {
-                    return Err(Resp::err(404, "no such page"));
+                    return Err(Resp::err(404, "no such canvas"));
                 }
                 self.switch_page(i);
                 Ok(Resp::json(200, json!({ "ok": true, "current": self.cur })))
@@ -491,14 +552,14 @@ impl App {
             ("DELETE", ["pages", i]) => {
                 let i = id_of(i)? as usize;
                 if i >= self.pages.len() {
-                    return Err(Resp::err(404, "no such page"));
+                    return Err(Resp::err(404, "no such canvas"));
                 }
                 let empty = if i == self.cur { self.shapes.is_empty() } else { self.pages[i].shapes.is_empty() };
                 if !empty {
-                    return Err(Resp::err(403, "only an empty page can be deleted through the API"));
+                    return Err(Resp::err(403, "only an empty canvas can be deleted through the API"));
                 }
                 if self.pages.len() < 2 {
-                    return Err(Resp::err(400, "the last page cannot be deleted"));
+                    return Err(Resp::err(400, "the last canvas cannot be deleted"));
                 }
                 self.delete_page(i);
                 Ok(Resp::json(200, json!({ "ok": true, "current": self.cur })))
@@ -740,6 +801,7 @@ impl App {
 
     // apply_patch for API clients: refuses edits outside a claude_edit copy, and remembers the top-level layers it creates
     fn api_patch(&mut self, p: &Value) -> Result<String, String> {
+        let p = &crate::patch_expand::expand_patch(p)?;
         let set = p["set"].as_array().into_iter().flatten().filter_map(|e| e["id"].as_u64());
         let remove = p["remove"].as_array().into_iter().flatten().filter_map(Value::as_u64);
         for id in set.chain(remove) {
@@ -903,5 +965,32 @@ impl App {
         self.api_owned.insert(fid);
         self.sizes.clear();
         Ok(json!({ "id": fid, "x": r.min.x, "y": r.min.y, "w": w }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // a request the client gave up on (it was answered 504) is not applied when the app finally gets to it
+    #[test]
+    fn a_request_the_client_gave_up_on_is_not_applied() {
+        let ctx = egui::Context::default();
+        let mut a = App::default();
+        let (tx, rx) = channel::<Req>();
+        a.api = Some(Api { port: 0, token: String::new(), rx });
+        let make = |at: std::time::Instant| {
+            let (reply, wait) = channel();
+            let body = br#"{"name":"Box","kind":"Rect","size":[40,20]}"#.to_vec();
+            (Req { method: "POST".into(), path: vec!["layers".into()], query: HashMap::new(), body, reply, at }, wait)
+        };
+        let now = std::time::Instant::now();
+        let (late, late_wait) = make(now.checked_sub(WAIT + Duration::from_secs(1)).unwrap());
+        let (fresh, fresh_wait) = make(now);
+        tx.send(late).unwrap();
+        tx.send(fresh).unwrap();
+        a.poll_api(&ctx);
+        assert_eq!(a.shapes.len(), 1, "only the request still waited for was applied");
+        assert!(late_wait.try_recv().is_err() && fresh_wait.try_recv().is_ok_and(|r| r.code == 200));
     }
 }

@@ -364,11 +364,12 @@ fn export_renders_png_and_pdf() {
 struct Harness {
     ctx: egui::Context,
     t: f64,
+    mods: egui::Modifiers, // held while the frames run
 }
 
 impl Harness {
     fn new() -> Self {
-        Self { ctx: egui::Context::default(), t: 0.0 }
+        Self { ctx: egui::Context::default(), t: 0.0, mods: egui::Modifiers::NONE }
     }
 
     fn frame(&mut self, app: &mut App, events: Vec<egui::Event>) {
@@ -377,6 +378,7 @@ impl Harness {
             screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(900.0, 700.0))),
             time: Some(self.t),
             events,
+            modifiers: self.mods,
             ..Default::default()
         };
         let _ = self.ctx.run_ui(raw, |ui| {
@@ -443,7 +445,6 @@ fn pen_tool_through_the_canvas() {
     let mut h = Harness::new();
     let mut a = App::default();
     h.frame(&mut a, vec![]); // lays out the canvas
-    a.rulers = false;
     a.snap = false;
 
     // click, click, click, then click on the first point: a closed triangle
@@ -571,16 +572,19 @@ fn hud_renders_for_every_selection() {
         a.sel = sel;
         for tab in [crate::Tab::Design, crate::Tab::Prototype] {
             a.tab = tab;
-            for left in [crate::LeftTab::Layers, crate::LeftTab::Assets, crate::LeftTab::History, crate::LeftTab::Comments] {
+            for left in [crate::LeftTab::Layers, crate::LeftTab::History, crate::LeftTab::Comments] {
                 a.left_tab = left;
+                a.assets_open = left == crate::LeftTab::Layers;
+                a.in_canvas = true;
                 for _ in 0..2 {
                     let raw = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1200.0, 800.0))), ..Default::default() };
                     let _ = ctx.run_ui(raw, |ui| {
-                        egui::Panel::left("rail").show(ui, |ui| a.rail(ui));
+                        a.menu_header_panel(ui);
                         egui::Panel::left("l").show(ui, |ui| a.left_panel(ui));
                         egui::Panel::right("r").show(ui, |ui| a.right_panel(ui));
                         egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| a.canvas(ui));
                         a.toolbar(ui.ctx());
+                        a.assets_window(ui.ctx());
                     });
                 }
             }
@@ -756,7 +760,6 @@ fn pencil_and_dev_mode_through_the_canvas() {
     let mut h = Harness::new();
     let mut a = App::default();
     h.frame(&mut a, vec![]);
-    a.rulers = false;
     a.snap = false;
     a.set_mode(crate::Mode::Draw);
     assert_eq!(a.tool, crate::Tool::Pencil);
@@ -927,7 +930,6 @@ fn brush_width_and_pressure() {
     let mut h = Harness::new();
     let mut a = App::default();
     h.frame(&mut a, vec![]);
-    a.rulers = false;
     a.snap = false;
     a.set_mode(crate::Mode::Draw);
     let stroke = |h: &mut Harness, a: &mut App, y: f32| {
@@ -992,7 +994,6 @@ fn motion_keyframes() {
     // through the canvas: in Motion mode at 1 s the rectangle is drawn at x 300, and dragging it moves the keyframe
     let mut h = Harness::new();
     h.frame(&mut a, vec![]);
-    a.rulers = false;
     a.snap = false;
     a.set_mode(crate::Mode::Motion);
     a.anim_time = 1000.0;
@@ -1082,7 +1083,6 @@ fn brush_presets() {
     let mut h = Harness::new();
     let mut a = App::default();
     h.frame(&mut a, vec![]);
-    a.rulers = false;
     a.snap = false;
     a.set_mode(crate::Mode::Draw);
     a.brush_w = 10.0;
@@ -1742,7 +1742,6 @@ fn arrow_tool_draws_a_line_with_an_arrowhead() {
     let mut h = Harness::new();
     let mut a = App::default();
     h.frame(&mut a, vec![]);
-    a.rulers = false;
     a.snap = false;
 
     // Shift+L picks the line tool with the arrowhead on
@@ -1769,7 +1768,6 @@ fn undo_takes_back_pen_points_first() {
     let mut h = Harness::new();
     let mut a = App::default();
     h.frame(&mut a, vec![]);
-    a.rulers = false;
     a.snap = false;
     let f = frame(&mut a, 600.0, 600.0, 50.0, 50.0);
     a.sel = vec![f];
@@ -1789,7 +1787,6 @@ fn pen_press_on_the_first_point_can_drag_the_closing_corner_round() {
     let mut h = Harness::new();
     let mut a = App::default();
     h.frame(&mut a, vec![]);
-    a.rulers = false;
     a.snap = false;
     a.set_tool(crate::Tool::Pen);
     for (x, y) in [(100.0, 100.0), (300.0, 100.0), (300.0, 300.0)] {
@@ -1808,7 +1805,6 @@ fn clicking_a_frames_body_selects_it_and_duplicates_count_up() {
     let mut h = Harness::new();
     let mut a = App::default();
     h.frame(&mut a, vec![]);
-    a.rulers = false;
     let f = frame(&mut a, 100.0, 100.0, 300.0, 300.0);
     let fi = a.index_of(f).unwrap();
     a.shapes[fi].name = "Frame 1".into();
@@ -1829,7 +1825,6 @@ fn section_slice_and_scale_tools() {
     let mut h = Harness::new();
     let mut a = App::default();
     h.frame(&mut a, vec![]);
-    a.rulers = false;
     a.snap = false;
     // Shift+S draws a Section: a frame that does not clip and is named like one
     h.keys(&mut a, vec![key_with(egui::Key::S, egui::Modifiers::SHIFT)]);
@@ -2057,6 +2052,53 @@ fn pages_move_duplicate_and_keep_their_comments() {
     assert_eq!(a.cur, 1);
     // the page that held the rectangle is now at 3
     assert_eq!(a.pages[3].shapes.len(), 1);
+}
+
+#[test]
+fn canvases_are_filed_in_folders_and_the_folders_are_saved() {
+    let mut a = App::default();
+    a.pages = ["A", "B", "C"].iter().map(|n| Page { name: (*n).into(), ..Page::default() }).collect();
+    a.cur = 0;
+    a.add_folder();
+    let f = a.folders[0].id;
+    assert_eq!(a.renaming_folder, Some(f), "a new folder opens its name for editing");
+    // dropped on the folder, C is filed in it and goes last
+    a.move_page_into(2, 3, f);
+    assert_eq!((a.pages[2].name.as_str(), a.pages[2].folder), ("C", f));
+    // a drop on the slot the canvas already has still files it, and the open canvas is still A
+    a.move_page_into(0, 0, f);
+    assert_eq!((a.pages[0].folder, a.cur), (f, 0));
+    // that is one undo step
+    a.do_undo(true);
+    assert_eq!(a.pages[0].folder, 0);
+    // a new canvas goes into the folder of the open one (A, moved to the end of the folder, is open)
+    a.move_page_into(0, 3, f);
+    a.add_page();
+    assert_eq!(a.pages[a.cur].folder, f);
+    // folders are in the file
+    let doc = a.doc();
+    assert_eq!(doc.folders.len(), 1);
+    let json = serde_json::to_string(&doc).unwrap();
+    let back: Doc = serde_json::from_str(&json).unwrap();
+    assert_eq!((back.folders[0].id, back.pages.iter().filter(|p| p.folder == f).count()), (f, 3));
+    // the list draws with the folder open and folded
+    let ctx = egui::Context::default();
+    for collapsed in [false, true] {
+        a.folders[0].collapsed = collapsed;
+        let raw = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(900.0, 700.0))), ..Default::default() };
+        let _ = ctx.run_ui(raw, |ui| {
+            egui::Panel::left("l").show(ui, |ui| a.left_panel(ui));
+        });
+    }
+    // a click on a canvas opens it in the panel, which then lists its layers (drawn too), Back returns to the list
+    a.in_canvas = true;
+    let raw = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(900.0, 700.0))), ..Default::default() };
+    let _ = ctx.run_ui(raw, |ui| {
+        egui::Panel::left("l").show(ui, |ui| a.left_panel(ui));
+    });
+    // deleting the folder lets its canvases out, and they stay
+    a.delete_folder(f);
+    assert!(a.folders.is_empty() && a.pages.iter().all(|p| p.folder == 0) && a.pages.len() == 4);
 }
 
 #[test]
@@ -2761,7 +2803,6 @@ fn lasso_selects_what_it_encloses() {
     // dragging through the canvas with the lasso tool selects them
     let mut h = Harness::new();
     a.lasso_tool = true;
-    a.rulers = false;
     a.snap = false;
     h.frame(&mut a, vec![]);
     let path = [Pos2::new(0.0, 0.0), Pos2::new(40.0, 0.0), Pos2::new(90.0, 100.0), Pos2::new(0.0, 100.0), Pos2::new(1.0, 1.0)];
@@ -3807,12 +3848,12 @@ fn rest_api_view_motion_tools_and_style_edits() {
             json(&b)["id"].as_u64().unwrap()
         };
         // view and preferences
-        assert_eq!(http(port, t, &host, "PUT", "/view", r#"{"rulers":false,"left_tab":"history","zoom":2,"guides":[{"vertical":true,"pos":100}],"nudge_big":20}"#).0, 200);
+        assert_eq!(http(port, t, &host, "PUT", "/view", r#"{"snap":false,"left_tab":"history","zoom":2,"guides":[{"vertical":true,"pos":100}],"nudge_big":20}"#).0, 200);
         let (_, b) = http(port, t, &host, "GET", "/view", "");
         let v = json(&b);
-        assert_eq!((v["rulers"].clone(), v["left_tab"].clone(), v["nudge_big"].clone(), v["guides"][0]["pos"].clone()), (false.into(), "history".into(), 20.0.into(), 100.0.into()));
+        assert_eq!((v["snap"].clone(), v["left_tab"].clone(), v["nudge_big"].clone(), v["guides"][0]["pos"].clone()), (false.into(), "history".into(), 20.0.into(), 100.0.into()));
         assert_eq!(http(port, t, &host, "PUT", "/view", r#"{"nonsense":1}"#).0, 400);
-        assert_eq!(http(port, t, &host, "PUT", "/view", r#"{"rulers":"false"}"#).0, 400, "wrong type");
+        assert_eq!(http(port, t, &host, "PUT", "/view", r#"{"snap":"false"}"#).0, 400, "wrong type");
         assert_eq!(http(port, t, &host, "PUT", "/view", r#"{"mode":""}"#).0, 400);
         assert_eq!(http(port, t, &host, "PUT", "/view", r#"{"left_tab":"sideways"}"#).0, 400);
         // the Motion timeline
@@ -3857,7 +3898,7 @@ fn rest_api_view_motion_tools_and_style_edits() {
         std::thread::sleep(std::time::Duration::from_millis(2));
     }
     client.join().unwrap();
-    assert!(!a.rulers && a.present.is_none());
+    assert!(a.present.is_none());
     let paths = a.shapes.iter().filter(|s| s.kind == Kind::Path).count();
     assert!(paths >= 4, "the cut made two paths and the builder at least two: {paths}");
     assert!(a.shapes.iter().any(|s| s.id == own && s.size.x == 50.0), "the person's layer is untouched");
@@ -4331,7 +4372,6 @@ fn typing_lines_into_a_text_box_grows_it() {
     let mut h = Harness::new();
     let mut a = App::default();
     h.frame(&mut a, vec![]);
-    a.rulers = false;
     a.set_tool(crate::Tool::Draw(Kind::Text));
     h.click(&mut a, scr(100.0, 100.0));
     assert!(a.editing_text.is_some(), "a click with the text tool starts editing");
@@ -4402,7 +4442,7 @@ fn page_hex_field_keeps_its_height_while_editing() {
         let mut v = vec![];
         for cs in &out.shapes {
             if let egui::Shape::Rect(r) = &cs.shape {
-                if r.fill == crate::theme::LINE() && r.rect.left() > 1190.0 && r.rect.height() <= 1.5 {
+                if r.fill == crate::theme::LINE() && r.rect.left() > 1130.0 && r.rect.height() <= 1.5 {
                     v.push(r.rect.top());
                 }
             }
@@ -4411,13 +4451,14 @@ fn page_hex_field_keeps_its_height_while_editing() {
     };
     frame(&mut a, vec![]);
     let idle = frame(&mut a, vec![]);
-    let p = Pos2::new(1260.0, 137.0);
+    let p = Pos2::new(1200.0, 185.0); // the right panel (300 wide) floats 8px in from the corner, under the 40px tab bar
     frame(&mut a, vec![egui::Event::PointerMoved(p)]);
     frame(&mut a, vec![Harness::button(p, true)]);
     frame(&mut a, vec![Harness::button(p, false)]);
     frame(&mut a, vec![]);
     let active = frame(&mut a, vec![]);
     assert_eq!(idle, active, "the panel keeps its layout while a field is being edited");
+    assert!(!idle.is_empty());
 }
 
 
@@ -5218,6 +5259,117 @@ fn render_imported_frames() {
     }
 }
 
+// where a frame of a big imported page goes (FIG_FILE, FIG_PAGE): the per-frame bookkeeping of `run_frame` and a zoom frame
+#[test]
+#[ignore]
+fn time_frames_of_an_imported_page() {
+    let Ok(path) = std::env::var("FIG_FILE") else { return };
+    let (doc, _) = App::doc_from_fig(&std::fs::read(path).unwrap()).unwrap();
+    let mut a = App::default();
+    a.open_doc(doc, std::path::PathBuf::from("x.json"));
+    let page = a.pages.iter().position(|p| p.name.trim() == std::env::var("FIG_PAGE").unwrap_or_default().trim()).unwrap_or(0);
+    a.switch_page(page);
+    let ctx2 = egui::Context::default();
+    let mut tt = 0.0;
+    let mut real = |a: &mut App, events: Vec<egui::Event>| {
+        tt += 0.1;
+        let raw = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1440.0, 900.0))), time: Some(tt), events, ..Default::default() };
+        let _ = ctx2.run_ui(raw, |ui| a.run_frame(ui));
+    };
+    let t = std::time::Instant::now();
+    let mut slowest = std::time::Duration::ZERO;
+    for _ in 0..80 {
+        let f = std::time::Instant::now();
+        real(&mut a, vec![]);
+        slowest = slowest.max(f.elapsed());
+    }
+    eprintln!("first 80 frames: {:?} in all, slowest {:?}, {} sprites", t.elapsed(), slowest, a.sprites.borrow().len());
+    let time = |what: &str, mut f: Box<dyn FnMut() + '_>| {
+        let t = std::time::Instant::now();
+        for _ in 0..5 {
+            f();
+        }
+        eprintln!("{what}: {:?}", t.elapsed() / 5);
+    };
+    eprintln!("{} layers", a.shapes.len());
+    let copy = a.shapes.clone();
+    time("shapes.clone()", Box::new(|| drop(std::hint::black_box(a.shapes.clone()))));
+    time("shapes == clone", Box::new(|| drop(std::hint::black_box(a.shapes == copy))));
+    time("snap_rest()", Box::new(|| drop(std::hint::black_box(a.snap_rest_for_test()))));
+    time("settle()", Box::new(|| a.settle()));
+    let ctx = ctx2.clone();
+    let painter = egui::Painter::new(ctx.clone(), egui::LayerId::background(), Rect::EVERYTHING);
+    time("prepare_textures", Box::new(|| a.prepare_textures(&ctx)));
+    let shapes = a.shapes.clone();
+    time("ensure_fonts", Box::new(|| drop(crate::textrun::ensure_fonts(&ctx, &shapes))));
+    time("fit_texts", Box::new(|| a.fit_texts(&painter)));
+    eprintln!("{} texts", a.shapes.iter().filter(|s| s.kind == Kind::Text).count());
+    let n = |f: &dyn Fn(&Shape) -> bool| a.shapes.iter().filter(|s| s.visible && f(s)).count();
+    eprintln!("composite triggers: shaders {} blend {} paint-blend {} effect-blend {} container-layerblur {} non-box-mask {}",
+        n(&|s| s.shaders.iter().any(|x| x.visible)),
+        n(&|s| !s.blend.is_normal()),
+        n(&|s| s.fills.iter().chain(&s.strokes).any(|p| p.visible && !p.blend.is_normal())),
+        n(&|s| s.effects.iter().any(|e| e.visible && !e.blend.is_normal())),
+        n(&|s| s.kind.is_container() && s.effects.iter().any(|e| e.visible && e.kind == EffectKind::LayerBlur)),
+        n(&|s| s.mask && !(matches!(s.kind, Kind::Rect | Kind::Frame) && s.rotation == 0.0 && s.radius.iter().all(|&r| r == 0.0))));
+    let hover = |x: f32| vec![egui::Event::PointerMoved(Pos2::new(x, 300.0))];
+    let mut x = 400.0;
+    time("hover frame", Box::new(|| {
+        x += 7.0;
+        real(&mut a, hover(x))
+    }));
+    time("idle frame", Box::new(|| real(&mut a, vec![])));
+    a.hide_ui = true;
+    time("idle frame, no panels", Box::new(|| real(&mut a, vec![])));
+    a.hide_ui = false;
+    let zoom = |dy: f32| vec![egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: Vec2::new(0.0, dy), phase: egui::TouchPhase::Move, modifiers: egui::Modifiers::COMMAND }];
+    {
+        let mut sizes: Vec<(usize, String, String)> = a.shapes.iter().filter(|s| s.needs_sprite()).map(|s| (serde_json::to_string(s).map_or(0, |j| j.len()), s.name.clone(), format!("{:?}", s.kind))).collect();
+        sizes.sort_by(|x, y| y.0.cmp(&x.0));
+        let total: usize = sizes.iter().map(|x| x.0).sum();
+        eprintln!("sprite shapes: {} with {} bytes of json in all; biggest: {:?}", sizes.len(), total, &sizes[..sizes.len().min(6)]);
+        if let Some(big) = a.shapes.iter().filter(|s| s.needs_sprite()).max_by_key(|s| serde_json::to_string(s).map_or(0, |j| j.len())) {
+            let v = serde_json::to_value(big).unwrap();
+            let mut fields: Vec<(usize, String)> = v.as_object().unwrap().iter().map(|(k, v)| (v.to_string().len(), k.clone())).collect();
+            fields.sort_by(|x, y| y.0.cmp(&x.0));
+            eprintln!("biggest shape's fields: {:?}", &fields[..fields.len().min(6)]);
+        }
+    }
+    let mut t2 = 1000.0;
+    // what a frame costs at each zoom: building the shapes (run_ui) and cutting them into triangles (tessellate), with what comes out
+    for (z, pan, bare) in [(1.0, Vec2::new(900.0, 100.0), false), (1.0, Vec2::new(900.0, 100.0), true), (0.5, Vec2::new(900.0, 100.0), true), (0.2, Vec2::new(900.0, 300.0), true), (0.08, Vec2::new(700.0, 300.0), true), (0.03, Vec2::new(400.0, 300.0), true)] {
+        a.hide_ui = bare;
+        a.zoom = z;
+        a.pan = pan;
+        for _ in 0..40 {
+            real(&mut a, vec![]); // lets the sprites catch up
+        }
+        let (mut run, mut cut, mut n, mut verts) = (std::time::Duration::ZERO, std::time::Duration::ZERO, 0, 0);
+        let _ = crate::prof::take();
+        for _ in 0..5 {
+            t2 += 0.1;
+            let raw = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1440.0, 900.0))), time: Some(t2), events: vec![egui::Event::PointerMoved(Pos2::new(700.0, 400.0))], ..Default::default() };
+            let t0 = std::time::Instant::now();
+            let out = ctx2.run_ui(raw, |ui| a.run_frame(ui));
+            run += t0.elapsed();
+            n = out.shapes.len();
+            let t1 = std::time::Instant::now();
+            let prims = ctx2.tessellate(out.shapes, out.pixels_per_point);
+            cut += t1.elapsed();
+            verts = prims.iter().map(|p| match &p.primitive { egui::epaint::Primitive::Mesh(m) => m.vertices.len(), _ => 0 }).sum::<usize>();
+        }
+        eprintln!("zoom {z} canvas only {bare}: run_ui {:?}, tessellate {:?}, {n} shapes, {verts} vertices", run / 5, cut / 5);
+        for (name, d) in crate::prof::take() {
+            eprintln!("      {name}: {:?}", d / 5);
+        }
+    }
+    for k in 0..14 {
+        let t = std::time::Instant::now();
+        real(&mut a, zoom(if k < 7 { 20.0 } else { -20.0 }));
+        eprintln!("zoom frame {k}: zoom {:.2} {:?} ({} sprites)", a.zoom, t.elapsed(), a.sprites.borrow().len());
+    }
+}
+
 #[test]
 #[ignore]
 fn probe_imported_point() {
@@ -5381,6 +5533,47 @@ fn tiny_fig() -> Vec<u8> {
     zip.start_file("canvas.fig", zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored)).unwrap();
     std::io::Write::write_all(&mut zip, &canvas).unwrap();
     zip.finish().unwrap().into_inner()
+}
+
+// File > Import runs on a thread and the window keeps drawing (with the progress card) until the document is in
+#[test]
+fn a_fig_import_runs_on_a_thread_and_opens_the_document_when_done() {
+    let path = std::env::temp_dir().join(format!("drui-import-test-{}.fig", std::process::id()));
+    std::fs::write(&path, tiny_fig()).unwrap();
+    let mut a = App::default();
+    let ctx = egui::Context::default();
+    let mut t = 0.0;
+    let mut frame = |a: &mut App| {
+        t += 0.1;
+        let raw = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1440.0, 900.0))), time: Some(t), ..Default::default() };
+        let _ = ctx.run_ui(raw, |ui| a.run_frame(ui));
+    };
+    a.import_fig(path.clone());
+    assert!(a.fig_import.is_some(), "the import starts without waiting for the file");
+    let mut shown = 0;
+    for _ in 0..1500 {
+        frame(&mut a);
+        shown += a.fig_import.is_some() as usize;
+        if a.fig_import.is_none() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let _ = std::fs::remove_file(&path);
+    assert!(a.fig_import.is_none(), "the import finished: {}", a.status);
+    assert!(shown >= 1, "at least one frame drew the progress card");
+    assert!(a.status.starts_with("imported 1 canvas"), "{}", a.status);
+    assert_eq!(a.pages[0].name, "Page 1");
+    // a second file cannot be started while one is running; a missing file is reported, not a crash
+    a.import_fig(std::env::temp_dir().join("drui-no-such-file.fig"));
+    for _ in 0..1500 {
+        frame(&mut a);
+        if a.fig_import.is_none() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(a.status.contains("could not import") && a.status.contains("could not read"), "{}", a.status);
 }
 
 #[test]
@@ -6535,4 +6728,264 @@ fn make_demo_doc() {
     a.shapes[li].size = Vec2::new(60.0, 40.0);
     a.reparent(line, Some(f));
     a.save_to(std::env::temp_dir().join("drui-demo.json"));
+}
+
+// focusing a field must not move its text
+#[test]
+fn number_and_hex_fields_keep_their_text_while_editing() {
+    let ctx = egui::Context::default();
+    let mut t = 0.0;
+    let (mut v, mut c) = (12.0f32, egui::Color32::from_rgb(1, 2, 3));
+    let mut run = |events: Vec<egui::Event>| -> Vec<(String, f32)> {
+        t += 0.1;
+        let raw = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(400.0, 200.0))), time: Some(t), events, ..Default::default() };
+        let out = ctx.run_ui(raw, |ui| {
+            egui::CentralPanel::default().show(ui, |ui| {
+                let r = Rect::from_min_size(Pos2::new(50.0, 50.0), Vec2::new(100.0, 24.0));
+                crate::fig::num_field(ui, r, ui.id().with("x"), crate::fig::Prefix::Text("X"), &mut v, crate::fig::Num::default(), "X");
+                crate::fig::hex_text(ui, Pos2::new(50.0, 120.0), 60.0, &mut c, ui.id().with("hex"));
+            });
+        });
+        out.shapes.iter().filter_map(|cs| if let egui::Shape::Text(ts) = &cs.shape { Some((ts.galley.text().to_string(), ts.pos.x + ts.galley.rows.first().map_or(0.0, |r| r.pos.x))) } else { None }).collect()
+    };
+    run(vec![]);
+    let idle = run(vec![]);
+    for p in [Pos2::new(100.0, 62.0), Pos2::new(55.0, 120.0)] {
+        run(vec![egui::Event::PointerMoved(p)]);
+        run(vec![Harness::button(p, true)]);
+        run(vec![Harness::button(p, false)]);
+        run(vec![]);
+    }
+    let active = run(vec![]);
+    for (name, x) in &idle {
+        if let Some((_, ax)) = active.iter().find(|(n, _)| n == name) {
+            assert_eq!(x, ax, "text {name:?} moved while focused");
+        }
+    }
+    assert!(active.len() >= 2, "{active:?}");
+}
+
+// frame F > frame N > rect R, with the pointer on R
+fn nested_layers(a: &mut App) -> (u64, u64, u64) {
+    let f = frame(a, 100.0, 100.0, 400.0, 400.0);
+    let n = frame(a, 150.0, 150.0, 200.0, 200.0);
+    let r = rect_at(a, 200.0, 200.0);
+    assert_eq!((a.shapes[a.index_of(n).unwrap()].parent, a.shapes[a.index_of(r).unwrap()].parent), (Some(f), Some(n)));
+    (f, n, r)
+}
+
+#[test]
+fn a_click_picks_the_outer_layer_and_ctrl_the_nested_one() {
+    let mut h = Harness::new();
+    let mut a = App::default();
+    h.frame(&mut a, vec![]);
+    let (_, n, r) = nested_layers(&mut a);
+    let on_r = scr(205.0, 205.0);
+    a.sel.clear(); // adding the layers selected the last one
+    h.click(&mut a, on_r);
+    assert_eq!(a.sel, vec![n], "a click picks the frame inside the top-level frame, not what is inside that");
+    // a layer that is selected stays what a click picks, so it can be dragged without Ctrl
+    a.sel = vec![r];
+    assert_eq!(a.select_unit(r), r);
+    a.sel.clear();
+    h.mods = egui::Modifiers::CTRL;
+    h.click(&mut a, on_r);
+    assert_eq!(a.sel, vec![r], "Ctrl+click reaches the nested layer");
+    // and the hover outline follows the same rule
+    h.mv(&mut a, scr(160.0, 160.0));
+    assert!(a.deep_pick);
+    assert_eq!(a.hit_test(Pos2::new(165.0, 165.0)).map(|id| a.select_unit(id)), Some(n));
+    h.mods = egui::Modifiers::NONE;
+    h.mv(&mut a, scr(161.0, 160.0));
+    assert!(!a.deep_pick);
+}
+
+#[test]
+fn alt_drag_leaves_the_layer_and_drops_a_copy() {
+    let mut h = Harness::new();
+    let mut a = App::default();
+    h.frame(&mut a, vec![]);
+    a.snap = false;
+    let r = rect_at(&mut a, 100.0, 100.0);
+    let i = a.index_of(r).unwrap();
+    a.shapes[i].size = Vec2::new(50.0, 50.0);
+    a.sel = vec![r];
+    h.mods = egui::Modifiers::ALT;
+    let (from, to) = (scr(120.0, 120.0), scr(320.0, 220.0));
+    h.mv(&mut a, from);
+    h.frame(&mut a, vec![Harness::button(from, true)]);
+    for k in 1..=4 {
+        h.frame(&mut a, vec![egui::Event::PointerMoved(from + (to - from) * (k as f32 / 4.0))]);
+    }
+    assert_eq!(a.shapes.len(), 2, "the copy exists while dragging");
+    let copy = a.shapes.iter().position(|s| s.id != r).unwrap();
+    assert!(a.shapes[copy].opacity < a.shapes[i].opacity, "and is see-through");
+    assert_eq!(a.shapes[i].pos, Pos2::new(100.0, 100.0), "the original stays");
+    h.frame(&mut a, vec![Harness::button(to, false)]);
+    h.frame(&mut a, vec![]);
+    assert_eq!(a.shapes.len(), 2);
+    assert_eq!(a.shapes[i].pos, Pos2::new(100.0, 100.0));
+    assert_eq!(a.shapes[copy].pos, Pos2::new(300.0, 200.0), "the copy lands where the pointer was released");
+    assert_eq!(a.shapes[copy].opacity, a.shapes[i].opacity, "and is solid again");
+    assert_eq!(a.sel, vec![a.shapes[copy].id]);
+}
+
+#[test]
+fn the_canvas_fills_the_window_and_the_side_panels_float_over_it() {
+    let ctx = egui::Context::default();
+    let mut a = App::default();
+    let mut shapes = 0;
+    for k in 0..3 {
+        let raw = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1440.0, 900.0))), time: Some(0.1 * (k + 1) as f64), ..Default::default() };
+        let out = ctx.run_ui(raw, |ui| a.run_frame(ui));
+        shapes = out.shapes.len();
+    }
+    assert!(shapes > 0);
+    assert_eq!(a.view.right(), 1440.0, "nothing is docked: the canvas runs to the window's right edge");
+    assert_eq!(a.view.left(), 0.0);
+    // the hide buttons put the panels away without moving the canvas
+    a.left_min = true;
+    a.right_min = true;
+    let raw = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1440.0, 900.0))), time: Some(1.0), ..Default::default() };
+    ctx.run_ui(raw, |ui| a.run_frame(ui));
+    assert_eq!((a.view.left(), a.view.right()), (0.0, 1440.0));
+}
+
+#[test]
+fn two_selected_layers_make_one_component_and_add_variant_copies_it() {
+    let mut a = App::default();
+    let r1 = rect_at(&mut a, 100.0, 100.0);
+    let r2 = rect_at(&mut a, 300.0, 200.0);
+    a.sel = vec![r1, r2];
+    a.make_component();
+    assert_eq!(a.sel.len(), 1, "one component, not two");
+    let c = a.index_of(a.sel[0]).unwrap();
+    assert!(a.shapes[c].component && a.shapes[c].kind == Kind::Frame);
+    assert_eq!(a.shapes.iter().filter(|s| s.component).count(), 1);
+    assert_eq!(a.shapes.iter().filter(|s| s.parent == Some(a.shapes[c].id)).count(), 2, "it holds both layers");
+    assert_eq!(a.world_rect(c).min, Pos2::new(100.0, 100.0));
+    assert_eq!(a.world_rect(c).max, Pos2::new(310.0, 210.0));
+    let i2 = a.index_of(r2).unwrap();
+    assert_eq!(a.shapes[i2].pos, Pos2::new(200.0, 100.0), "layers keep their place");
+    // Add variant: the lone component becomes the Default variant of a set, and a copy is added as Variant2
+    a.combine_as_variants();
+    let set = a.index_of(a.sel[0]).unwrap();
+    let c = a.variants_of(set)[0];
+    a.add_variant(c);
+    let values: Vec<_> = a.variants_of(set).iter().map(|&k| a.shapes[k].variant.clone()).collect();
+    assert_eq!(values, vec![vec![("Property 1".to_string(), "Default".to_string())], vec![("Property 1".to_string(), "Variant2".to_string())]]);
+    let copy = a.variants_of(set)[1];
+    assert_eq!(a.shapes.iter().filter(|s| s.parent == Some(a.shapes[copy].id)).count(), 2, "the copy has the layers too");
+}
+
+#[test]
+fn files_open_as_tabs_with_their_own_history() {
+    let dir = std::env::temp_dir().join(format!("drui-tabs-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let (fa, fb) = (dir.join("a.json"), dir.join("b.json"));
+    let mut a = App::default();
+    rect_at(&mut a, 10.0, 10.0);
+    a.save_to(fa.clone());
+    a.undo.clear();
+    a.saved_undo = 0;
+    a.load_from(fb.clone()); // b does not exist yet: nothing is opened
+    assert_eq!(a.tabs.len(), 1);
+    let mut other = App::default();
+    rect_at(&mut other, 0.0, 0.0);
+    rect_at(&mut other, 50.0, 50.0);
+    other.save_to(fb.clone());
+    a.load_from(fb.clone());
+    assert_eq!((a.tabs.len(), a.open_tab, a.shapes.len()), (2, 1, 2), "b opens in a tab of its own");
+    assert_eq!(a.tab_title(0), "a");
+    assert_eq!(a.tab_title(1), "b");
+    a.undo.push(a.snap());
+    assert!(a.tab_dirty(1) && !a.tab_dirty(0));
+    a.switch_tab(0);
+    assert_eq!((a.open_tab, a.shapes.len()), (0, 1), "a is back");
+    assert!(a.undo.is_empty(), "with its own history");
+    a.load_from(fb.clone());
+    assert_eq!((a.tabs.len(), a.open_tab), (2, 1), "an open file is shown, not opened twice");
+    assert_eq!(a.undo.len(), 1, "and keeps its history");
+    a.new_tab();
+    assert_eq!((a.tabs.len(), a.open_tab, a.tab_title(2)), (3, 2, "Untitled".to_string()));
+    a.close_tab(2);
+    assert_eq!((a.tabs.len(), a.open_tab), (2, 1));
+    a.close_tab(1); // b has unsaved edits and a file: saved, then closed
+    assert_eq!((a.tabs.len(), a.open_tab, a.tab_title(0)), (1, 0, "a".to_string()));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// POST /patch's compact forms and vectors, applied to a document
+#[test]
+fn a_compact_patch_builds_a_grid_of_tiles_and_vectors_from_path_data_and_svg() {
+    let mut a = App::default();
+    let patch = serde_json::json!({
+        "templates": { "tile": { "kind": "Frame", "name": "Tile {n}", "w": 80, "h": 90, "children": [
+            { "kind": "Rect", "name": "icon", "w": 40, "h": 40, "x": 20, "y": 8, "fill": "{color}" },
+            { "kind": "Text", "text": "{label}", "x": 8, "y": 60 } ] } },
+        "add": [
+            { "ref": "screen", "kind": "Frame", "name": "Home", "x": 0, "y": 0, "w": 390, "h": 400, "children": [
+                { "use": "tile", "x": 12, "y": 12, "repeat": { "cols": 4, "dx": 90, "dy": 100 }, "each": [
+                    { "label": "Ride", "color": "#00aa13" }, { "label": "Car", "color": "#ee2737" }, { "label": "Food", "color": "#ffb300" },
+                    { "label": "Send", "color": "#1976d2" }, { "label": "Mart", "color": "#7b1fa2" } ] } ] },
+            { "parent_ref": "screen", "kind": "Path", "name": "Heart", "x": 300, "y": 300, "d": "M 20 10 C 20 0 0 0 0 10 C 0 20 20 28 20 36 C 20 28 40 20 40 10 C 40 0 20 0 20 10 Z", "fill": "#ff4d6d" },
+            { "parent_ref": "screen", "svg": "<svg xmlns='http://www.w3.org/2000/svg' width='24' height='24'><circle cx='12' cy='12' r='10' fill='#00aa13'/><path d='M7 12 L11 16 L17 8' stroke='#fff' stroke-width='2' fill='none'/></svg>", "name": "Check", "x": 340, "y": 20 }
+        ]
+    });
+    let out = a.apply_patch(&patch).unwrap();
+    assert!(out.contains("added"), "{out}");
+    let by = |a: &App, name: &str| a.shapes.iter().position(|s| s.name == name).unwrap_or_else(|| panic!("no layer {name}"));
+    // five tiles in a 4-wide grid: the fifth starts the second row
+    let t1 = by(&a, "Tile 1");
+    let t5 = by(&a, "Tile 5");
+    assert_eq!((a.shapes[t1].pos, a.shapes[t5].pos), (egui::Pos2::new(12.0, 12.0), egui::Pos2::new(12.0, 112.0)));
+    let labels: Vec<&str> = a.shapes.iter().filter(|s| s.kind == Kind::Text).map(|s| s.text.as_str()).collect();
+    assert_eq!(labels, vec!["Ride", "Car", "Food", "Send", "Mart"]);
+    let icon_of_t5 = a.shapes.iter().find(|s| s.name == "icon" && s.parent == Some(a.shapes[t5].id)).unwrap();
+    assert_eq!(icon_of_t5.fills[0].kind, PaintKind::Solid(egui::Color32::from_rgb(0x7b, 0x1f, 0xa2)));
+    // the vector: a closed curve drawn from (300, 300), about 40 wide and 36 tall
+    let heart = &a.shapes[by(&a, "Heart")];
+    assert_eq!(heart.kind, Kind::Path);
+    assert!(!heart.path.is_empty() && heart.path[0].closed && heart.path[0].pts.len() >= 4, "{:?}", heart.path);
+    assert!((heart.pos.x - 300.0).abs() < 1.0 && (heart.size.x - 40.0).abs() < 1.0, "{:?} {:?}", heart.pos, heart.size);
+    // the SVG: a frame at (340, 20) holding a vector per drawn shape
+    let check = by(&a, "Check");
+    assert_eq!((a.shapes[check].kind, a.shapes[check].pos), (Kind::Frame, egui::Pos2::new(340.0, 20.0)));
+    assert_eq!(a.shapes.iter().filter(|s| s.parent == Some(a.shapes[check].id) && s.kind == Kind::Path).count(), 2);
+    // a mistake is an error, not a half-built page
+    assert!(a.apply_patch(&serde_json::json!({ "add": [{ "kind": "Path", "d": "nonsense" }] })).is_err());
+}
+
+// a component set built from one patch: crossed lists make the variants, `property` links the label, the set names and lays them out
+#[test]
+fn a_patch_builds_one_component_set_with_variants_and_a_text_property() {
+    let mut a = App::default();
+    let patch = serde_json::json!({
+        "templates": { "btn": { "kind": "Frame", "component": true, "name": "Button", "h": "{h}", "fill": "{fill}",
+            "variant": [["Style", "{style}"], ["Size", "{size}"], ["State", "{state}"]],
+            "layout": { "pad": [16, 0, 16, 0], "main": "Center", "cross": "Center", "hug_y": false },
+            "children": [{ "kind": "Text", "name": "Label", "text": "Button", "font_size": "{fs}", "property": "Text" }] } },
+        "add": [{ "kind": "Frame", "name": "Button", "component_set": true, "children": [
+            { "use": "btn", "each": {
+                "look": [{ "style": "Primary", "state": "Default", "fill": "#4560ff" }, { "style": "Primary", "state": "Hover", "fill": "#3a50e0" },
+                         { "style": "Danger", "state": "Default", "fill": "#e5484d" }, { "style": "Danger", "state": "Hover", "fill": "#cd3a3f" }],
+                "size": [{ "size": "Small", "h": 32, "fs": 13 }, { "size": "Large", "h": 48, "fs": 16 }] } }] }]
+    });
+    a.apply_patch(&patch).unwrap();
+    let set = a.shapes.iter().position(|s| s.component_set).unwrap();
+    let vs = a.variants_of(set);
+    assert_eq!(vs.len(), 8, "4 looks x 2 sizes");
+    let props = a.variant_properties(set);
+    assert_eq!(props.iter().map(|(n, v)| (n.as_str(), v.len())).collect::<Vec<_>>(), vec![("Style", 2), ("Size", 2), ("State", 2)]);
+    assert!(vs.iter().any(|&k| a.shapes[k].name == "Style=Danger, Size=Large, State=Hover"));
+    // laid out inside the set, none on top of another
+    let rects: Vec<egui::Rect> = vs.iter().map(|&k| egui::Rect::from_min_size(a.shapes[k].pos.to_vec2().to_pos2(), a.shapes[k].size)).collect();
+    assert!(rects.iter().enumerate().all(|(i, r)| rects.iter().skip(i + 1).all(|o| !r.intersects(*o))));
+    // one Text property on the set, linked from the label of every variant
+    assert_eq!(a.shapes[set].cprops.len(), 1);
+    let pid = a.shapes[set].cprops[0].id;
+    let labels: Vec<&Shape> = a.shapes.iter().filter(|s| s.name == "Label").collect();
+    assert_eq!(labels.len(), 8);
+    assert!(labels.iter().all(|l| l.cprop_link == Some(pid)));
+    assert!(a.apply_patch(&serde_json::json!({ "add": [{ "kind": "Rect", "property": "Nope" }] })).is_err());
 }

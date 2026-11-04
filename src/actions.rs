@@ -69,7 +69,6 @@ const COMMANDS: &[(&str, &str, u8, Run)] = &[
     ("Zoom to fit", "Shift+1", 0, |a| a.zoom_fit(false)),
     ("Zoom to selection", "Shift+2", 0, |a| a.zoom_fit(true)),
     ("Zoom to 100%", "Shift+0", 0, |a| a.zoom_at_center(1.0)),
-    ("Show / hide rulers", "Shift+R", 0, |a| a.rulers ^= true),
     ("Show / hide pixel grid", "Shift+'", 0, |a| a.pixel_grid ^= true),
     ("Show / hide outlines", "Ctrl+Shift+O", 0, |a| a.outlines ^= true),
     ("Show / hide layout guides", "Shift+G", 0, |a| a.layout_guides ^= true),

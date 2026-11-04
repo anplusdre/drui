@@ -4,6 +4,8 @@ drui is a UI design tool I'm building in Rust. You draw frames, set up auto layo
 
 It started as "can I build a design tool that feels fast and works the way I want?" and it has grown into something that is already useful every day. It is still unfinished, and the checklist below says plainly what works and what doesn't.
 
+![drui editing a dashboard: layers on the left, the design on the canvas, properties on the right](docs/img/screenshot.png)
+
 Fonts are [Inter](https://rsms.me/inter/) (OFL) and icons are [Lucide](https://lucide.dev) (ISC).
 
 ## The plan
@@ -62,7 +64,7 @@ Legend: ✅ done and covered by a test, 🟡 works with limits, ⬜ not built ye
 - ✅ JSON files with migration of older files
 - ✅ Export PNG / JPG / SVG / PDF, per-layer export settings, batch export
 - ✅ Import SVG
-- ✅ Import `.fig` files (pages, layers, fills, strokes, effects, auto layout, text, components, prototype links, variables)
+- 🟡 Import `.fig` files (pages, layers, fills, strokes, effects, auto layout, text, components, prototype links, variables): imperfect. Some files come in with differences, and very large files (thousands of layers) can still be slow to import and to navigate
 - 🟡 `.fig` import: library components from other files, FigJam-only objects and plugin data are not carried over
 - 🟡 Comments: no attachments, per-message edit / delete or pin dragging
 
