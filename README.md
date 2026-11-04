@@ -6,6 +6,10 @@ It started as "can I build a design tool that feels fast and works the way I wan
 
 ![drui editing a dashboard: layers on the left, the design on the canvas, properties on the right](docs/img/screenshot.png)
 
+Agent mode turns the canvas into a place to talk to Claude Code: click a layer, say what to change, and it edits a copy of the design through the local REST API.
+
+![Agent mode: a chat box beside the selected layer and a message ready to send](docs/img/agent-mode.png)
+
 Fonts are [Inter](https://rsms.me/inter/) (OFL) and icons are [Lucide](https://lucide.dev) (ISC).
 
 ## The plan
