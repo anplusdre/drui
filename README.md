@@ -42,7 +42,7 @@ Legend: ✅ done and covered by a test, 🟡 works with limits, ⬜ not built ye
 - ✅ Text editing, auto-size, text styles, mixed styles inside one text layer
 - ✅ Pencil and brushes (pressure, taper, calligraphy, scatter, stretch brushes)
 - 🟡 Eyedropper picks from layers, not from any screen pixel (egui cannot sample the screen)
-- ⬜ Text on a path, Scale tool, Slice and Section
+- ✅ Text on a path, Scale tool (K), Slice and Section
 
 ### Styling
 - ✅ Multiple fills and strokes; solid, linear / radial / angular / diamond gradients, image and video fills
@@ -51,12 +51,13 @@ Legend: ✅ done and covered by a test, 🟡 works with limits, ⬜ not built ye
 - ✅ Opacity, blend modes, colour, text and effect styles, selection colors
 - ✅ Variables: colour / number / string / boolean, collections, modes, aliases
 - 🟡 Glass effect is an approximation
-- ⬜ Pattern and shader paints in the colour picker, gradient stop editing in the picker (stops are editable on the canvas)
+- 🟡 Pattern and shader paints and gradient stops are in the colour picker; no test covers them yet
 
 ### Layout
 - ✅ Constraints, layout guides (grid, columns, rows)
 - ✅ Auto layout: flow, wrap, grid, alignment, padding, gap, Hug / Fixed / Fill, min and max sizes, absolute children
-- ⬜ Alignment "More actions" menu, "Show in exports", ready-for-dev toggle
+- ✅ Fill "Show in exports"
+- 🟡 Alignment "More actions" menu and the ready-for-dev toggle exist; no test covers them yet
 
 ### Components
 - ✅ Components, instances, swap, detach, overrides
