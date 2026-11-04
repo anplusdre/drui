@@ -137,6 +137,8 @@ pub struct Agent {
     pop_n: usize,       // rows in the list of mentions (0 = closed)
     pop_sel: usize,
     pop_off: bool,      // Esc closed the list until the text changes
+    signin: Option<(Receiver<bool>, Arc<Mutex<Proc>>)>, // `claude auth login` running for the modal's Sign in: whether it ended signed in
+    signin_failed: bool,
 }
 
 // what a run's thread has sent: status lines update `status`, the first other event ends the run. A thread that died without a word
@@ -219,6 +221,31 @@ fn find_claude() -> Option<&'static str> {
 fn logged_in(bin: &str) -> bool {
     let Ok(out) = quiet(Command::new(bin).args(["auth", "status"])).output() else { return true };
     serde_json::from_slice::<serde_json::Value>(&out.stdout).ok().and_then(|v| v["loggedIn"].as_bool()).unwrap_or(true)
+}
+
+// the modal's Sign in: `claude auth login` opens the browser and returns when the sign-in is done (or was given up). Nothing is typed to it.
+fn signin_thread(ctx: egui::Context, slot: Arc<Mutex<Proc>>, tx: Sender<bool>) {
+    let done = |ok: bool| {
+        let _ = tx.send(ok);
+        ctx.request_repaint();
+    };
+    let Some(bin) = find_claude() else { return done(false) };
+    let started = launch(&slot, || quiet(Command::new(bin).args(["auth", "login"]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null())).spawn());
+    if !matches!(started, Some(Ok(_))) {
+        return done(false);
+    }
+    loop {
+        match proc_lock(&slot).child.as_mut() {
+            Some(c) => {
+                if c.try_wait().map_or(true, |s| s.is_some()) {
+                    break;
+                }
+            }
+            None => return, // Stop took it: the window no longer listens
+        }
+        std::thread::sleep(std::time::Duration::from_millis(300));
+    }
+    done(logged_in(bin));
 }
 
 // not rewritten when it already says this: another drui window running the same build may be reading it, and a write is a moment of an empty file
@@ -1314,16 +1341,42 @@ impl App {
     // Claude Code is missing or not signed in: what to do about it
     fn agent_modal(&mut self, ctx: &egui::Context) {
         let Some(problem) = self.agent.problem else { return };
+        if let Some((rx, _)) = &self.agent.signin {
+            match rx.try_recv() {
+                Ok(true) => {
+                    self.agent.signin = None;
+                    self.agent.problem = None; // signed in: the message is back in the chatbox, ready to send
+                    return;
+                }
+                Ok(false) | Err(TryRecvError::Disconnected) => {
+                    self.agent.signin = None;
+                    self.agent.signin_failed = true;
+                }
+                Err(TryRecvError::Empty) => {}
+            }
+        }
+        let waiting = self.agent.signin.is_some();
         let (title, body, command) = match problem {
             Problem::NotInstalled => ("Claude Code is not installed", "Agent mode runs your own Claude Code on this computer. Install it, sign in, then send your message again.".to_string(), Some(INSTALL)),
-            Problem::NotLoggedIn => ("Claude Code is not signed in", "Claude Code is installed but you are not signed in. Open a terminal, run claude and sign in (type /login), then send your message again.".to_string(), Some("claude")),
+            Problem::NotLoggedIn => (
+                "Claude Code is not signed in",
+                if self.agent.signin.is_some() {
+                    "Finish signing in in the browser window that opened. This closes when you are done."
+                } else if self.agent.signin_failed {
+                    "Signing in did not finish. Try again, or open a terminal, run claude and type /login. Then send your message again."
+                } else {
+                    "Claude Code is installed but you are not signed in. Sign in opens your browser; when it is done, send your message again. Or run claude in a terminal and type /login."
+                }
+                .to_string(),
+                if self.agent.signin.is_some() { None } else { Some("claude") },
+            ),
             Problem::NoApi => (
                 "drui could not start its API",
                 format!("Agent mode edits your design through drui's local REST API, and it could not start: {}. A firewall or security program may be blocking drui from listening on 127.0.0.1. Allow it, try again, then send your message again.", self.agent.api_error),
                 None,
             ),
         };
-        let (mut done, mut retry) = (false, false);
+        let (mut done, mut retry, mut sign_in) = (false, false, false);
         egui::Area::new(Id::new("agent-modal")).anchor(Align2::CENTER_CENTER, [0.0, 0.0]).order(Order::Tooltip).show(ctx, |ui| {
             thread_frame().show(ui, |ui| {
                 ui.set_width(360.0);
@@ -1345,11 +1398,21 @@ impl App {
                 if fig::button(ui, Rect::from_min_size(Pos2::new(r.right() - 16.0 - 60.0, r.top() + PAD), Vec2::new(60.0, fig::ROW)), "Close").clicked() {
                     done = true;
                 }
-                let (label, w) = if command.is_some() { ("Copy command", 100.0) } else { ("Try again", 80.0) };
-                if fig::button(ui, Rect::from_min_size(Pos2::new(r.right() - 16.0 - 60.0 - 8.0 - w, r.top() + PAD), Vec2::new(w, fig::ROW)), label).clicked() {
-                    match command {
-                        Some(c) => ui.ctx().copy_text(c.to_owned()),
-                        None => retry = true,
+                let mut right = r.right() - 16.0 - 60.0 - 8.0;
+                if problem == Problem::NotLoggedIn {
+                    let (label, w) = if waiting { ("Waiting...", 80.0) } else { ("Sign in", 70.0) };
+                    if fig::button(ui, Rect::from_min_size(Pos2::new(right - w, r.top() + PAD), Vec2::new(w, fig::ROW)), label).clicked() && !waiting {
+                        sign_in = true;
+                    }
+                    right -= w + 8.0;
+                }
+                if !waiting {
+                    let (label, w) = if command.is_some() { ("Copy command", 100.0) } else { ("Try again", 80.0) };
+                    if fig::button(ui, Rect::from_min_size(Pos2::new(right - w, r.top() + PAD), Vec2::new(w, fig::ROW)), label).clicked() {
+                        match command {
+                            Some(c) => ui.ctx().copy_text(c.to_owned()),
+                            None => retry = true,
+                        }
                     }
                 }
             });
@@ -1357,7 +1420,19 @@ impl App {
         if retry {
             self.agent_connect(ctx, 0); // closes the modal when it works, else shows the new reason
         }
+        if sign_in {
+            let (tx, rx) = channel();
+            let slot = Arc::new(Mutex::new(Proc::default()));
+            let (c, s) = (ctx.clone(), slot.clone());
+            std::thread::spawn(move || signin_thread(c, s, tx));
+            self.agent.signin = Some((rx, slot));
+            self.agent.signin_failed = false;
+        }
         if done {
+            if let Some((_, slot)) = self.agent.signin.take() {
+                proc_lock(&slot).stop(); // closing gives the sign-in up
+            }
+            self.agent.signin_failed = false;
             self.agent.problem = None;
         }
     }
@@ -1451,6 +1526,31 @@ mod tests {
         drop(taken);
         assert!(a.agent_connect(&ctx, port), "Try again works once the port is free");
         assert!(a.agent.problem.is_none() && a.api.is_some());
+    }
+
+    // Sign in in the modal: while `claude auth login` runs the modal waits; when it ends signed in the modal closes; if not, it says so;
+    // closing the modal gives the sign-in up
+    #[test]
+    fn the_sign_in_modal_waits_closes_when_signed_in_and_reports_a_failure() {
+        let ctx = egui::Context::default();
+        let mut a = App::default();
+        let run = |a: &mut App, ok: Option<bool>| {
+            let (tx, rx) = channel();
+            if let Some(ok) = ok {
+                tx.send(ok).unwrap();
+            } else {
+                std::mem::forget(tx); // still running
+            }
+            a.agent.signin = Some((rx, Arc::new(Mutex::new(Proc::default()))));
+            a.agent.problem = Some(Problem::NotLoggedIn);
+            let _ = ctx.run_ui(egui::RawInput::default(), |_| a.agent_modal(&ctx));
+        };
+        run(&mut a, None);
+        assert!(a.agent.problem == Some(Problem::NotLoggedIn) && a.agent.signin.is_some(), "still waiting for the browser");
+        run(&mut a, Some(true));
+        assert!(a.agent.problem.is_none() && a.agent.signin.is_none(), "signed in: the modal is gone");
+        run(&mut a, Some(false));
+        assert!(a.agent.problem == Some(Problem::NotLoggedIn) && a.agent.signin.is_none() && a.agent.signin_failed, "it did not finish: the modal says so");
     }
 
     // each run is told its own drui's address, whatever the shared file in the temp folder says

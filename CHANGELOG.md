@@ -6,6 +6,7 @@
 - **Agent mode**: talk to Claude Code on the canvas; it edits a `claude_edit` copy through the REST API.
 - **File tabs** along the top of the window.
 - **Compact patches**: `POST /patch` accepts `children`, `templates` with `use`, `repeat` / `each`, SVG path vectors and component sets with variants.
+- Agent mode: a **Sign in** button in the "not signed in" message runs `claude auth login` (it opens your browser) and closes the message when you are signed in.
 - README screenshot.
 
 ### Changed
